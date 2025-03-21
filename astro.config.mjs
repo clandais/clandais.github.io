@@ -4,33 +4,18 @@ import sitemap from "@astrojs/sitemap";
 import tailwind from "@astrojs/tailwind";
 import icon from "astro-icon";
 
-import remarkToc from 'remark-toc';
-import rehypeToc from "rehype-toc";
+import markdownConfig from "./markdown.config";
 
 
 export default defineConfig({
   
   site: "https://clandais.github.io",
 
-  markdown: {
-  
-    remarkPlugins: [[remarkToc, { tight: true, ordered: true }]],
-    rehypePlugins: [
-      [
-        rehypeToc,
-        {
-          headings: ["h1", "h2"],
-          cssClasses: {
-            toc: "toc-post", 
-            link: "toc-link", 
-          },
-        },
-      ],
-    ],
-  },
+  markdown: markdownConfig,
 
   integrations: [
     mdx({
+      ...markdownConfig,
       extendPlugins: false,
     }),
     sitemap(),
