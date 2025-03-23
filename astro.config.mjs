@@ -4,7 +4,7 @@ import sitemap from "@astrojs/sitemap";
 import tailwind from "@astrojs/tailwind";
 import icon from "astro-icon";
 
-import markdownConfig from "./markdown.config";
+import markdownConfig from "./markdown.config.mjs";
 
 
 export default defineConfig({
@@ -16,6 +16,8 @@ export default defineConfig({
   integrations: [
     mdx({
       ...markdownConfig,
+      syntaxHighlight: 'shiki',
+      shikiConfig: { theme: 'dark-plus' },
       extendPlugins: false,
     }),
     sitemap(),

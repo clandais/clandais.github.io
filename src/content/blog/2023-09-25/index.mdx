@@ -1,0 +1,269 @@
+---
+title: "Unity game architecture Part 1"
+date: "Sep 25 2023"
+description: "Where I'm talking about the architecture of my Unity game(s)."
+draft: false
+---
+
+import { Picture } from 'astro:assets';
+import Caption from '../../../components/Caption.astro';
+
+import impostor from "./img/impostor-syndrom.png"
+import rootScope from "./img/root-scope.png"
+import vcontainerSettings from "./img/vcontainer-settings.png"
+import bill from "./img/bill.png"
+import gameBootScene from "./img/game-boot-scene.png"
+import mainMenuScope from "./img/main-menu-scope.png"
+import mainMenuView from "./img/main-menu-view.png"
+
+## DI, Entry Point(s), MV(C,P,CS)
+
+> As your Unity  game scales, you may find yourself struggling with spaghetti code or situations where it becomes harder and harder to debug. I’d like to share here some tips and practices that helped me while working on [Bill](https://billthegame.com/) . This first draft was greatly inspired by an article written by Rubén Torres Bonet at [The GameDev Guru](https://thegamedev.guru/) and by my own reflections while trying to be a better game craftsman.
+
+Let’s sum up what Rubén said.
+
+### 1. Dependency Injection
+
+If you are not sure what is “dependency injection” or “DI” for short, I’ll let you read the Wikipedia article about it…
+
+I’m kidding. Simply put:
+
+1. It allows to write less code (less code, less bugs).
+2. if following the “SRP” (Single Responsibility Principle), you should know that your classes are supposed to be responsible to do their small chunk of tasks. These tasks should not include  fetching their dependencies.
+
+> With great power comes great responsibility
+
+DI is a very powerful pattern. To avoid using it badly and end up with more spaghettis, try to keep in mind the SRP.
+
+As of 2023, lots of DI frameworks are available for Unity. I picked [VContainer](https://vcontainer.hadashikick.jp/) as it is still actively maintained and “promotes” itself as 5 to 10 times faster than Zenject. Plus, it integrates really well with popular libraries like UniRx or UniTask.
+
+### 2. A single entry point
+
+I should mention the single entry point now because it pairs really well with DI.
+
+The entry point should “simply” bootstrap the game:
+
+1. Load services (ads, audio, save system, etc…).
+2. Build the dependency graph.
+3. Load the game.
+4. It could conditionally load some “debug overlay” scene in dev mode.
+
+### 3. Additive scene loading
+
+Rubén already wrote some good points about additive scene loading and the performances issues with prefabs. Personally, I found it easier  and cleaner to increment this way. 
+
+## Getting started and refactoring Bill
+
+I’d like to fix some “mistakes” I’ve made while working on Bill. As progress was made through the development of the game, my skills as a programmer progressed too. I realized that some choices I’ve made were hard to maintain, then tried another solution to solve this problem… while not being 100% convinced, thus, not applying these solutions to what was already coded… And switching again.
+
+<Picture src={impostor} formats={['avif', 'webp']} alt="A graphics showing the Dunning-Kruger effect" />
+
+I have created an “experimental” branch to apply these patterns and will give here some things I’ve learnt on the way to achieving Clean(er) Code.
+
+First, I have created a temporary *Scene*  just to create a prefab. This prefab is one Game Object with one script. I then created a VContainer Settings asset and set its *Root Lifetime Scope*  field to this prefab.
+
+
+<Picture src={rootScope} formats={['avif', 'webp']} alt="Unity Inspector view of the Game Lifetime Scope prefab" />
+<Caption>Unity Inspector view of the Game Lifetime Scope prefab</Caption>
+
+
+<Picture src={vcontainerSettings} formats={['avif', 'webp']} alt="Unity Inspector view of the VContainer Settings Asset" />
+<Caption>Unity Inspector view of the VContainer Settings Asset</Caption>
+
+```csharp
+[AddComponentMenu("Bill/Containers/Game Lifetime Scope")]
+    [DefaultExecutionOrder(-100)]
+    public class GameLifetimeScope : LifetimeScope
+    {
+        [SerializeField] private BillSceneReferences sceneReferences;
+
+        protected override void Configure(IContainerBuilder builder)
+        {
+            builder.RegisterInstance(sceneReferences);
+            builder.Register<ISaveSystemService, SaveSystemService>(Lifetime.Singleton);
+            builder.Register<ISceneLoaderService, SceneLoaderService>(Lifetime.Singleton);
+            builder.Register<CommandFactory>(Lifetime.Singleton);
+            builder.RegisterEntryPoint<GameEntryPoint>();
+        }
+    }
+```
+
+> The script in question is pretty simple. It is some kind of “pre-entry-point”. It  needs a `ScriptableObject` (`BillSceneReferences`) which holds, you guessed it, references to game scenes assets (thanks to Eflatun.Scenereference). It then registers the first needed dependencies: scene references, the Command Factory (well, actually a Pooled Command Factory, coming to this later) as a Singleton and  the game’s Entry Point.
+
+Here is the bare `GameEntryPoint` class:
+
+```csharp
+public class GameEntryPoint : IAsyncStartable
+{
+    [Inject] private CommandFactory commandFactory;
+    [Inject] private BillSceneReferences sceneReferences;
+
+    public async UniTask StartAsync(CancellationToken cancellation)
+    {
+        await UniTask.Create(() => UniTask.WaitForSeconds(.1f, cancellationToken: cancellation));
+    }
+}
+```
+
+> The `[Inject]` attribute kind of magically sets these fields as long as they were registered in the GameLifetimeScope. VContainer provides an IAsyncStartable  interface which, in this case, is pretty handy for loading scenes.
+> This class, at this point, does not do anything. 😄
+
+Next is the main menu setup. It is a pretty simple scene.
+
+
+<Picture src={bill} formats={['avif', 'webp']} alt="A picture of the game's Main Menu" />
+<Caption>A picture of the game's Main Menu</Caption>
+
+> Francesco is a fantastic artist ! ([@francescocrisci.art](https://www.instagram.com/francescocrisci.art/?hl=fr))
+
+
+<Picture src={gameBootScene} formats={['avif', 'webp']} alt="Unity's Hierachy view of the Game Boot Scene" />
+<Caption>Unity's Hierachy view of the Game Boot Scene</Caption>
+
+Top to bottom: 
+
+1. Main Menu Scope holds a script that registers dependencies for this specific scene. It is a child scope of `GameLifetimeScope`.
+2. Main Menu View : Here comes the MVP pattern.
+3. And then, the usual UI stuff.
+
+
+<Picture src={mainMenuScope} formats={['avif', 'webp']} alt="Unity's Inpsector View the Main Menu Scope" />
+<Caption>Unity's Inpsector View the Main Menu Scope</Caption>
+
+Here is the *Main Menu Scope* Game Object. It is a child scope of `GameLiftimeScope`.
+
+<Picture src={mainMenuView} formats={['avif', 'webp']} alt="Unity's Inpsector View the Main Menu View" />
+<Caption>Unity's Inpsector View the Main Menu View</Caption>
+
+And the *Main Menu View* that holds references to the two main menu Buttons.
+
+Some code:
+
+```csharp
+[AddComponentMenu("Bill/Containers/Main Menu Lifetime Scope")]
+public class MainMenuLifetime : LifetimeScope
+{
+    [SerializeField] private MainMenuView mainMenuView;
+
+    protected override void Configure(IContainerBuilder builder)
+    {
+        builder.RegisterEntryPoint<MainMenuPresenter>(Lifetime.Scoped);
+        builder.Register<IMainMenuService, MainMenuService>(Lifetime.Scoped);
+        builder.RegisterComponent(mainMenuView);
+    }
+}
+```
+> `LifetimeScope` extends `MonoBehaviour` so it needs to be attached to a game object. There are other ways to create child scopes dynamically though. In this case, the main menu, it needs a reference to the `MainMenuView` to inject it into plain C# classes.
+
+```csharp
+[AddComponentMenu("Bill/Components/Main Menu View")]
+public class MainMenuView : MonoBehaviour
+{
+    [SerializeField] private Button startButton;
+    [SerializeField] private Button quitButton;
+		[SerializeField] private Button loadButton;
+
+    public Button StartButton => startButton;
+    public Button QuitButton => quitButton;
+		public Button LoadButton => loadButton;
+}
+```
+> The `MainMenuView`. KISS (Keep It Simple, Stupid) view (just before overengineering the behavior  😀)
+
+```csharp
+[UsedImplicitly]
+public class MainMenuPresenter : IStartable, IDisposable
+{
+    private readonly CompositeDisposable disposables = new CompositeDisposable();
+
+    private readonly MainMenuView mainMenuView;
+    private readonly IMainMenuService mainMenuService;
+    private readonly ISaveSystemService saveSystemService;
+
+    public MainMenuPresenter(MainMenuView mainMenuView, IMainMenuService mainMenuService, ISaveSystemService saveSystemService)
+    {
+        this.mainMenuView = mainMenuView;
+        this.mainMenuService = mainMenuService;
+        this.saveSystemService = saveSystemService;
+    }
+
+    public void Start()
+    {
+        mainMenuView.StartButton.OnClickAsObservable()
+            .Subscribe(_ => mainMenuService.OnPlayButtonClicked())
+            .AddTo(disposables);
+
+        mainMenuView.QuitButton.OnClickAsObservable()
+            .Subscribe(_ => mainMenuService.OnQuitButtonClicked())
+            .AddTo(disposables);
+
+        mainMenuView.LoadButton.OnClickAsObservable()
+            .Subscribe(_ => mainMenuService.OnLoadButtonClicked())
+            .AddTo(disposables);
+
+        saveSystemService.HasSaveData().SubscribeToInteractable(mainMenuView.LoadButton)
+            .AddTo(disposables);
+    }
+
+    public void Dispose()
+    {
+        disposables.Dispose();
+    }
+}
+```
+> Here we go. The `MainMenuPresenter` is registered as an Entry Point. Implementing the `IStartable` interface will make it Start like a `Monobehaviour`. Dependencies are injected via Constructor Injection. Upon starting, it registers callbacks for button-clicking. I used some UniRx in there just because (it removes some boilerplate code like unsubscribing to events)
+
+```csharp
+public interface IMainMenuService
+{
+    Task OnPlayButtonClicked();
+    void OnQuitButtonClicked();
+    void OnLoadButtonClicked();
+}
+```
+> I’m the guy who was bitching at the software architect : “Why do you even need all these interfaces for everything ?!”
+
+```csharp
+[UsedImplicitly]
+public class MainMenuService : IMainMenuService
+{
+    private readonly ISceneLoaderService sceneLoaderService;
+
+    public MainMenuService(ISceneLoaderService sceneLoaderService)
+    {
+        this.sceneLoaderService = sceneLoaderService;
+    }
+
+    public async Task OnPlayButtonClicked()
+    {
+        LoadCinematicSceneTransaction loadCinematicSceneTransaction = new LoadCinematicSceneTransaction(this, sceneLoaderService);
+        await sceneLoaderService.ExecuteTransactionAsync(loadCinematicSceneTransaction);
+        UnloadMainMenuSceneTransaction unloadMainMenuSceneTransaction = new UnloadMainMenuSceneTransaction(this, sceneLoaderService);
+        await sceneLoaderService.ExecuteTransactionAsync(unloadMainMenuSceneTransaction);
+    }
+
+    public void OnQuitButtonClicked()
+    {
+        // TODO: Exit the game gracefully.
+        Application.Quit();
+    }
+
+    public void OnLoadButtonClicked()
+    {
+        // TODO: Opens the load game menu.
+        throw new NotImplementedException();
+    }
+```
+> Finally, the `MainMenuService `code. Same steps, mostly. First, setup  for DI. Second, actually do the things!
+
+To make things more convoluted, instead of using the *Command Pattern* here, I went with a transactional / contractual system.
+
+Why ?
+
+I’m pretty sure there are a lot of ways to handle this but I’ve run with this to make what is happening clearer to me. Let’s say you are using an *Event Bus* or *Scriptable Objects* events. At some point, things start to get messy. You get all these decoupled events that are hard to track. Who sent the event ? Who intercepted it ? That’s especially useful in this kind of game state-changing operations.
+
+I’ll have to take a break at this point of the story and, maybe, start working on Part 2.
+
+This is my first article. I hope it is useful to you. Feedbacks are more than welcome.
+
+Last words: a BIG thank you to Charlie de St Jores ([@Marijenburg](https://twitter.com/Marijenburg)) for giving me his full trust on handling the coding-side of Bill. It’s an awesome opportunity for me to work on something I care for and to learn, learn, learn and learn more.

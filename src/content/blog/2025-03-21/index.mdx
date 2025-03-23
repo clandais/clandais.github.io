@@ -1,0 +1,154 @@
+---
+title: "Making a Survivors-like with Latios Framework Part 2"
+date: "Mar 21 2025"
+description: "Where I document my DOTS and Latios Framework learning journey."
+draft: true
+---
+
+import { Picture } from 'astro:assets';
+import Caption from '../../../components/Caption.astro';
+
+
+import annaMetro from './img/anna-metro.jpg';
+import annaSettings from './img/anna-settings.png';
+import annaSettings1 from './img/anna-settings-1.png';
+import levelCollision from './img/level-collision.png';
+import floorTile from './img/floor-tile.png';
+import cornerWallTile from './img/corner-wall-tile.png';
+import collidersDebug from './img/colliders-debug.png';
+
+# Making the Character Move
+
+This time around, I will be focusing on the character movement.
+I will be using Psyshock and Anna.
+
+## Psyshock
+
+Psyshock is one of Latios' modules. As described in the documentation:
+> Psyshock Physics is a physics and spatial query module focused on user control. While most physics engines provide out-of-the-box simulation, Psyshock instead provides direct access to the underlying algorithms so that you can craft the perfect physics simulation for your game and not waste any computation on things you don’t need. Psyshock’s Collision Layers can be built directly from Entity Queries, removing all the archetype guesswork out of collisions and triggers.
+
+## Anna
+
+
+<Picture src={annaMetro} formats={['avif', 'webp']}  height={450} alt="One Anna" />
+<Caption >Not This Anna</Caption>
+
+> Anna is a simple out-of-the-box rigid body physics engine built on Psyshock’s UnitySim APIs. It is intended to be general-purpose, striking a balance between performance, flexibility, and most importantly, ease-of-use.
+
+Dispite Anna being a pretty recent AddOn for Latios and being in early development, it is already very powerful and easy to use.
+
+
+I'll create a new subscene just to hold Anna's settings.
+<Picture src={annaSettings} alt="Anna Settings Subscene"/>
+
+The settings `Subdivisions Per Axis`have been chosen based on these recommendations from Psyshock's documentation:
+
+> Lastly, you should only ever raise the subdivisions of the x-axis when you are having trouble increasing y and z and need more parallelism. This is because the x-axis already benefits from sorting, and the subdivisions don’t offer much additional benefits.
+> 
+> Here’s some examples:
+> - A top-down game with a large mostly-flat world
+>   - (1, 1, 8) or (2, 1, 5) or similar
+> - A 2D side-scrolling platformer
+>   - (3, 4, 1) or similar
+> - An arena shooter with lots of verticality and lots of bullets
+>   - (2, 3, 3) or (1, 4, 4) or similar
+> - A massive space battle
+>   - (1, 12, 12) or similar
+
+<Picture src={annaSettings1} alt="Anna Settings Script"/>
+
+The `Subdivisions Per Axis` are set to `(1, 1, 8)` because I want to have a top-down game with a large mostly-flat world.
+
+Since I'm having a hard time visualizing the World Bounds, I've writtent this msall editor scrolling script to help me out:
+
+```csharp
+namespace Survivors.Editor.Anna
+{
+    [CustomEditor(typeof(AnnaSettings))]
+    public class AnnaSettingsEditor : UnityEditor.Editor
+    {
+        void OnSceneGUI()
+        {
+            var t = target as AnnaSettings;
+            if (!t)
+                return;
+
+            var bounds = t.worldBounds;
+
+            Handles.color = Color.green;
+            Handles.DrawWireCube(bounds.center, bounds.size);
+        }
+    }
+}
+```
+
+# Making a base level
+
+Still using KayKit's assets, I'm picking a floor tile and a wall tile.
+Then, I'm creating a new subscene with an exceptionally orgiginal name : `Level`.
+Finally, I'm adding a root game object that will hold 2 scripts.
+
+
+<Picture src={levelCollision} alt="Level Collision"/>
+
+Let's break it down:
+- `Custom Collider`is a Psyshock authoring script. I've set the `Collider Type` to `Compound` and cheked `Generate From Children` so that it will generate a compound collider from the children of the game object (obviously).
+- `Collision Tag Authoring` is an Anna authoring script. Set to `Include Evironment Self Only`. It will add an `EnvironmentCollisionTag` to the baked entity, automatically generate an `EnvironmentCollisionLayer`, add it to the `sceneBlackBoardEntity` (so we can query it) and update it in `BuildEnvironmentCollisionLayerSystem`.  
+
+Anna can generate colliders recursively but, since I have a compound collider, I don't need to do that.
+
+Here is the kind of setup I have for a floot tile:
+<Picture src={floorTile} alt="Floor Tile"/>
+<Caption>I'm adding an empty parent to have the pivot point in a corner. It will save me some level design time with the help of snapping.</Caption>
+
+It is a similar setup for the wall tile.
+I've added a "Wall Corner" and, since I don't want to use `MeshColliders`, I've made two child `BoxColliders` and get baked by the `Custom Collider` script.
+It works suprisingly well.
+
+A simple system we can add to debug and visualize the colliders and the collision layers :
+
+```csharp
+namespace Survivors.Play.Systems.Debug
+{
+    [RequireMatchingQueriesForUpdate]
+    public partial struct PhysicsDebugSystem : ISystem
+    {
+        LatiosWorldUnmanaged m_world;
+        EntityQuery m_Query;
+
+        [BurstCompile]
+        public void OnCreate(ref SystemState state)
+        {
+            m_world = state.GetLatiosWorldUnmanaged();
+            m_Query = state.Fluent()
+                .With<EnvironmentCollisionTag>()
+                .Build();
+        }
+
+        [BurstCompile]
+        public void OnUpdate(ref SystemState state)
+        {
+            var layer = m_world.sceneBlackboardEntity
+                .GetCollectionComponent<EnvironmentCollisionLayer>().layer;
+            state.Dependency = PhysicsDebug.DrawLayer(layer).ScheduleParallel(state.Dependency);
+
+            foreach (var (collider, transformAspect) in SystemAPI.Query<RefRO<Collider>, TransformAspect>()
+                         .WithAll<PlayerTag>())
+            {
+                var t = transformAspect.worldTransform;
+                PhysicsDebug.DrawCollider(in collider.ValueRO, in t, Color.green);
+            }
+
+            foreach (var (collider, transformAspect) in SystemAPI.Query<RefRO<Collider>, TransformAspect>()
+                         .WithAll<EnvironmentCollisionTag>())
+            {
+                var t = transformAspect.worldTransform;
+                PhysicsDebug.DrawCollider(in collider.ValueRO, in t, Color.red);
+            }
+        }
+    }
+}
+```
+
+<Picture src={collidersDebug} alt="Colliders Debug"/>
+<Caption>Debugging the colliders. Everything looks fine.</Caption>
