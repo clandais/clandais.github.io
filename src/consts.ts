@@ -47,4 +47,9 @@ export const SOCIALS: Socials = [
     ICON: "mdi:twitter",
     HREF: "https://x.com/_blood_pact_",
   },
+  {
+    NAME: "instagram",
+    ICON: "mdi:instagram",
+    HREF: "https://www.instagram.com/blood.pact.studios/",
+  }
 ];
