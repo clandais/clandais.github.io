@@ -1,12 +1,17 @@
 ---
 title: "Making a Survivors-like with Latios Framework Part 2"
-date: "Mar 21 2025"
+date: "Mar 25 2025"
 description: "Where I document my DOTS and Latios Framework learning journey."
-draft: true
+draft: false
+
+baseVideoUrl: "../../vids/blog/latios-survivors-p2/"
+
 ---
 
 import { Picture } from 'astro:assets';
 import Caption from '../../../components/Caption.astro';
+import Video from '../../../components/Video.astro';
+
 
 
 import annaMetro from './img/anna-metro.jpg';
@@ -16,8 +21,11 @@ import levelCollision from './img/level-collision.png';
 import floorTile from './img/floor-tile.png';
 import cornerWallTile from './img/corner-wall-tile.png';
 import collidersDebug from './img/colliders-debug.png';
+import capsuleBarbarian from './img/capsule-barbarian.png';
+import cinemachineSpline from './img/cinemachine-spline.png';
+import levelV1 from './img/level-v1.png';
 
-# Making the Character Move
+Making the Character Move
 
 This time around, I will be focusing on the character movement.
 I will be using Psyshock and Anna.
@@ -37,6 +45,12 @@ Psyshock is one of Latios' modules. As described in the documentation:
 
 Dispite Anna being a pretty recent AddOn for Latios and being in early development, it is already very powerful and easy to use.
 
+
+Before I go any further, I need to add a new scripting define to the project to enable Anna : `LATIOS_ADDON_ANNA` and bootstrap it in the `LatiosBoostrap` class.
+```csharp
+// Easy !
+Latios.Anna.AnnaBootstrap.InstallAnna(world);
+``` 
 
 I'll create a new subscene just to hold Anna's settings.
 <Picture src={annaSettings} alt="Anna Settings Subscene"/>
@@ -82,7 +96,9 @@ namespace Survivors.Editor.Anna
 }
 ```
 
-# Making a base level
+## Setup
+
+### Making a base level
 
 Still using KayKit's assets, I'm picking a floor tile and a wall tile.
 Then, I'm creating a new subscene with an exceptionally orgiginal name : `Level`.
@@ -102,8 +118,7 @@ Here is the kind of setup I have for a floot tile:
 <Caption>I'm adding an empty parent to have the pivot point in a corner. It will save me some level design time with the help of snapping.</Caption>
 
 It is a similar setup for the wall tile.
-I've added a "Wall Corner" and, since I don't want to use `MeshColliders`, I've made two child `BoxColliders` and get baked by the `Custom Collider` script.
-It works suprisingly well.
+I've added a "Wall Corner" and, since I don't want to use `MeshColliders`, I've made two child `BoxColliders` that should get baked by the `Custom Collider` script.
 
 A simple system we can add to debug and visualize the colliders and the collision layers :
 
@@ -152,3 +167,544 @@ namespace Survivors.Play.Systems.Debug
 
 <Picture src={collidersDebug} alt="Colliders Debug"/>
 <Caption>Debugging the colliders. Everything looks fine.</Caption>
+
+### Capsule Collider
+
+I'll add a `CapsuleCollider` to the little barbarian and a `Anna Rigid Body Authoring` component.
+I'll lock the rotation on all axes for now.
+
+<Picture src={capsuleBarbarian} alt="Capsule Barbarian"/>
+<Caption>Capsule Collider and Rigid Body</Caption> 
+
+### Sanity Check
+
+Let's move up the barbarian authoring Game Object, save the scenes and run the game to see if everything is working as expected.
+
+<Video src={frontmatter.baseVideoUrl + "barbarian-bounce.mp4"} />
+<Caption>Barbarian bouncing on the floor. Cute.</Caption>
+
+## Input and Player Movement
+
+I've been reading this part of the documentation entitled "How To Make an N – 1 Render Loop" [*here*](https://github.com/Dreaming381/Latios-Framework-Documentation/blob/main/Core/How%20To%20Make%20an%20N%20-%201%20Render%20Loop.md). From what I understand, it means that explicitely ordering your systems in a random fashion would be suboptimal.
+
+
+### Input System
+So, first, I'll move the `EscapeKeySystem`in a root super system and add a `PlayerInputSuperSystem` like this:
+```csharp
+namespace Survivors.Bootstrap.RootSystems
+{
+    [UpdateInGroup(typeof(PreTransformSuperSystem))]
+    public partial class InputRootSystem : RootSuperSystem
+    {
+        protected override void CreateSystems()
+        {
+            GetOrCreateAndAddManagedSystem<EscapeKeySystem>();
+            GetOrCreateAndAddManagedSystem<PlayerInputSuperSystem>();
+        }
+    }
+}
+```
+
+Here is the `PlayerInputSuperSystem`:
+
+```csharp
+namespace Survivors.Bootstrap.RootSystems.SuperSystems
+{
+    public partial class PlayerInputSuperSystem : SuperSystem
+    {
+        
+        EntityQuery m_shouldUpdateQuery;
+        
+        protected override void CreateSystems()
+        {
+            m_shouldUpdateQuery = Fluent
+                .With<PauseRequestedTag>()
+                .Build();
+            
+            
+            GetOrCreateAndAddManagedSystem<PlayerInputSystem>();
+        }
+
+        public override bool ShouldUpdateSystem()
+        {
+            return m_shouldUpdateQuery.IsEmptyIgnoreFilter;
+        }
+    }
+}
+```
+
+Upon creating the sub systems, I'm creating a query that will be used in `ShouldUpdateSystem()` to check if the game is paused or not and, thus, if the input system should run or not.
+
+Next, I'll create an authoring script to add to the scene blackboard entity.
+```csharp
+namespace Survivors.Play.Authoring
+{
+    public class InputAuthoring : MonoBehaviour
+    {
+        class InputAuthoringBaker : Baker<InputAuthoring>
+        {
+            public override void Bake(InputAuthoring authoring)
+            {
+                var entity = GetEntity(TransformUsageFlags.None);
+                AddComponent<PlayerInputState>(entity);
+            }
+        }
+    }
+
+    public struct PlayerInputState : IComponentData
+    {
+        // We don't need more right now
+        public float2 Direction;
+    }
+}
+```
+
+Finaly, I'll create the `PlayerInputSystem` that will read the input and update the `PlayerInputState` component.
+```csharp
+namespace Survivors.Play.Systems.Input
+{
+    [RequireMatchingQueriesForUpdate]
+    public partial class PlayerInputSystem : SubSystem
+    {
+        InputSystem_Actions m_inputActions;
+        EntityQuery m_Query;
+
+        protected override void OnCreate()
+        {
+            m_inputActions = new InputSystem_Actions();
+            m_inputActions.Enable();
+
+            m_Query = Fluent
+                .With<PlayerInputState>()
+                .Build();
+        }
+
+        protected override void OnDestroy()
+        {
+            m_inputActions.Disable();
+        }
+
+
+        protected override void OnUpdate()
+        {
+            var move = m_inputActions.Player.Move.ReadValue<Vector2>();
+
+            if (math.length(move) > 0.01f) move = math.normalize(move);
+
+            sceneBlackboardEntity.SetComponentData(new PlayerInputState
+            {
+                Direction = move
+            });
+        }
+    }
+}
+```
+
+### Player Movement System
+
+Now, to use the input state to move the player, I'll need an authoring script to:
+- set a `PlayerTag` and a `MovementSettings` component.
+- add a `PlayerMovementSystem` to the `PlayerMotionSuperSystem` in the `PreAnnaRootSystem` (because I'll move the player with RigidBody).
+
+
+```csharp
+namespace Survivors.Play.Authoring
+{
+    public class PlayerAuthoring : MonoBehaviour
+    {
+        
+        [SerializeField] private MovementSettings movementSettings;
+        
+        private class PlayerAuthoringBaker : Baker<PlayerAuthoring>
+        {
+            public override void Bake(PlayerAuthoring authoring)
+            {
+                var entity = GetEntity(TransformUsageFlags.Dynamic);
+                AddComponent<PlayerTag>(entity);
+                AddComponent(entity, authoring.movementSettings);
+            }
+        }
+    }
+    
+    public struct PlayerTag : IComponentData { }
+
+    [Serializable]
+    public struct MovementSettings : IComponentData
+    {
+        public float moveSpeed;
+        // not yet used
+        public float rotationSpeed;
+        public float speedChangeRate;
+    }
+}
+```
+
+```csharp
+namespace Survivors.Play.Systems.Player
+{
+    [RequireMatchingQueriesForUpdate]
+    public partial struct PlayerMovementSystem : ISystem
+    {
+        LatiosWorldUnmanaged m_world;
+        EntityQuery m_Query;
+
+        [BurstCompile]
+        public void OnCreate(ref SystemState state)
+        {
+            m_world = state.GetLatiosWorldUnmanaged();
+            m_Query = state.Fluent()
+                .With<PlayerInputState>()
+                .Build();
+        }
+
+        [BurstCompile]
+        public void OnUpdate(ref SystemState state)
+        {
+            var playerInputState = m_world.sceneBlackboardEntity.GetComponentData<PlayerInputState>();
+            var move = playerInputState.Direction;
+
+            foreach (var (rb, movementSettings) in SystemAPI.Query<RefRW<RigidBody>, RefRO<MovementSettings>>()
+                         .WithAll<PlayerTag>())
+            {
+                var currentVelocity = rb.ValueRO.velocity.linear;
+                var desiredVelocity = new float3(move.x, 0f, move.y) * movementSettings.ValueRO.moveSpeed;
+                
+                
+                // We don't want to change the gravity force
+                desiredVelocity.y = currentVelocity.y;
+
+                currentVelocity =
+                    currentVelocity.MoveTowards(desiredVelocity, movementSettings.ValueRO.speedChangeRate);
+                rb.ValueRW.velocity.linear = currentVelocity;
+            }
+        }
+    }
+}
+```
+
+Where does this `MoveTowards` function come from ? It's a simple extension method I wrote that mimics `Vector3.MoveTowards(Vector3 current, Vector3 target, float maxDistanceDelta)`.
+```csharp
+namespace Survivors.Utilities
+{
+    public static class Float3Extensions
+    {
+        public static float3 MoveTowards(this float3 current,
+            float3 target,
+            float maxDistanceDelta)
+        {
+            var a = target - current;
+            var magnitude = math.length(a);
+
+            if (magnitude <= maxDistanceDelta || magnitude < math.EPSILON) return target;
+
+            return current + a / magnitude * maxDistanceDelta;
+        }
+    }
+}
+```
+
+Now, we can add it to some system hierachy.
+
+```csharp
+namespace Survivors.Bootstrap.RootSystems
+{
+    [UpdateBefore(typeof(AnnaSuperSystem))]
+    public partial class  PreRigidBodyRootSystem : RootSuperSystem
+    {
+        
+        EntityQuery m_shouldUpdateQuery;
+        
+        protected override void CreateSystems()
+        {
+            m_shouldUpdateQuery = Fluent.With<PauseRequestedTag>()
+                .Build();
+            
+            GetOrCreateAndAddManagedSystem<PlayerMotionSuperSystem>();
+        }
+
+        public override bool ShouldUpdateSystem()
+        {
+            return m_shouldUpdateQuery.IsEmptyIgnoreFilter;
+        }
+    }
+}
+
+namespace Survivors.Bootstrap.RootSystems.SuperSystems
+{
+    public partial class PlayerMotionSuperSystem : SuperSystem
+    {
+        protected override void CreateSystems()
+        {
+            GetOrCreateAndAddUnmanagedSystem<PlayerMovementSystem>();
+        }
+    }
+}
+
+```
+
+### Issue
+
+If we play the game and press pause...
+The `PlayerMovementSystem` will not run, it will nor update the RigidBody velicty but the physics simulation will still run and the player will be able to move.
+
+To solve this, I first tried to override `AnnaSuperSystem` and used the `ShouldUpdateSystem()` method to check if the game is paused or not.
+Sadly, when Anna's simulation is paused, a lot of errors are thrown in the console.
+
+A wild guess : most of the operations run by Anna are using multithreaded Pyshsock jobs that may or may not be completed when the simulation is paused,
+thus the errors complaining about "disposed arrays" and "layers" being "differents".
+
+### Hacking
+
+I don't know if this is the best way to do it but I added a new authoring script that adds a `SavedRigidBodyState` component to the player (and future enemies).
+```csharp
+namespace Survivors.Play.Authoring.Anna
+{
+    [AddComponentMenu("Survivors/Anna/AnnaRigidBodyExtension")]
+    [RequireComponent(typeof(AnnaRigidBodyAuthoring))]
+    public class AnnaRigidBodyExtensionAuthoring : MonoBehaviour
+    {
+        class AnnaRigidBodyExtensionBaker : Baker<AnnaRigidBodyExtensionAuthoring>
+        {
+            public override void Bake(AnnaRigidBodyExtensionAuthoring authoring)
+            {
+                var entity = GetEntity(TransformUsageFlags.Dynamic);
+                AddComponent<SavedRigidBodyState>(entity);
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Saved state of a rigid body.
+    /// </summary>
+    public struct SavedRigidBodyState : IComponentData
+    {
+        public UnitySim.Velocity Velocity;
+        public float InverseMass;
+        public half CoefficientOfFriction;
+        public half CoefficientOfRestitution;
+    }
+}
+```
+
+Then, I'm creating a Root Super System that will run before the `AnnaSuperSystem` like the `PreRigidBodyRootSystem`. It will update when the pause is requested. Using `ISystemStartStop`, it will save the rigid body state in `OnStartRunning` and restore it in `OnStopRunning`.
+```csharp
+namespace Survivors.Bootstrap.RootSystems
+{
+    [UpdateBefore(typeof(AnnaSuperSystem))]
+    public partial class PreAnnaRootSystem : RootSuperSystem
+    {
+        EntityQuery m_shouldUpdateQuery;
+
+        protected override void CreateSystems()
+        {
+            m_shouldUpdateQuery = Fluent.With<PauseRequestedTag>()
+                .Build();
+
+            GetOrCreateAndAddUnmanagedSystem<PreAnnaPauseSystem>();
+        }
+
+        public override bool ShouldUpdateSystem()
+        {
+            return !m_shouldUpdateQuery.IsEmptyIgnoreFilter;
+        }
+    }
+}
+```
+<Caption>Registration</Caption>
+
+```csharp
+namespace Survivors.Play.Systems.PreAnna
+{
+    public partial struct PreAnnaPauseSystem : ISystem, ISystemStartStop
+    {
+        EntityQuery m_shouldUpdateQuery;
+
+        [BurstCompile]
+        public void OnCreate(ref SystemState state)
+        {
+            m_shouldUpdateQuery = state.Fluent().Without<PauseRequestedTag>()
+                .Build();
+        }
+
+        public void OnStartRunning(ref SystemState state)
+        {
+            var world = state.GetLatiosWorldUnmanaged();
+            var ecb = world.syncPoint.CreateEntityCommandBuffer();
+
+            foreach (var (rb, last, entity) in
+                     SystemAPI.Query<RefRO<RigidBody>,
+                             RefRW<SavedRigidBodyState>>()
+                         .WithEntityAccess())
+            {
+                last.ValueRW.Velocity                 = rb.ValueRO.velocity;
+                last.ValueRW.InverseMass              = rb.ValueRO.inverseMass;
+                last.ValueRW.CoefficientOfFriction    = rb.ValueRO.coefficientOfFriction;
+                last.ValueRW.CoefficientOfRestitution = rb.ValueRO.coefficientOfRestitution;
+
+                ecb.RemoveComponent<RigidBody>(entity);
+            }
+        }
+
+        public void OnStopRunning(ref SystemState state)
+        {
+            var world = state.GetLatiosWorldUnmanaged();
+            var ecb = world.syncPoint.CreateEntityCommandBuffer();
+
+            foreach (var (last, entity)
+                     in SystemAPI.Query<RefRO<SavedRigidBodyState>>()
+                         .WithEntityAccess())
+                ecb.AddComponent(entity, new RigidBody
+                {
+                    velocity                 = last.ValueRO.Velocity,
+                    inverseMass              = last.ValueRO.InverseMass,
+                    coefficientOfFriction    = last.ValueRO.CoefficientOfFriction,
+                    coefficientOfRestitution = last.ValueRO.CoefficientOfRestitution
+                });
+        }
+    }
+}
+```
+<Caption>System</Caption>
+
+<Video src={frontmatter.baseVideoUrl + "barbarian-paused.mp4"} />
+<Caption>Barbarian paused. No more movement.</Caption>
+
+## More Level Design and a proper Top-Down Camera
+
+### Camera
+I'll have a simple Cinemachine setup: a Cinemachine Camera with a Cinemachine Spline Dolly. I'll setup only one knot for the spline (for now).
+<Picture src={cinemachineSpline} alt="Cinemachine Spline Dolly"/>
+<Caption>One knot for the spline</Caption>
+
+The Spline is a child of an empty game object that will be the target of the camera.
+I'm adding a quick MonoBehaviour to move the target and register it in the `GameLifetimeScope`.
+
+```csharp
+namespace Survivors.GameScope.MonoBehaviours
+{
+    [AddComponentMenu("Survivors/Cinemachine Behaviour")]
+    public class CinemachineBehaviour : MonoBehaviour
+    {
+        [SerializeField] Transform target;
+        [SerializeField] CinemachineSplineDolly dolly;
+
+        public void SetTargetPosition(Vector3 position)
+        {
+            target.position = position;
+        }
+    }
+}
+```
+
+Something that will be useful here and later is to have a system that tracks the player's position and set it in a component to the Scene Blackboard Entity.
+```csharp
+namespace Survivors.Play.Authoring
+{
+    public class PlayerPositionAuthoring : MonoBehaviour
+    {
+        class PlayerPositionAuthoringBaker : Baker<PlayerPositionAuthoring>
+        {
+            public override void Bake(PlayerPositionAuthoring authoring)
+            {
+                var entity = GetEntity(TransformUsageFlags.None);
+                AddComponent<PlayerPosition>(entity);
+            }
+        }
+    }
+
+    public struct PlayerPosition : IComponentData
+    {
+        public float3 Position;
+    }
+}
+```
+
+I could have tow systems that will run in the `LateSimulationSystemGroup`.
+One will update the `PlayerPosition` component and the other will set the target position of the camera (in that order). The later will have the `CinemachineBehaviour`injected by VContainer.
+```csharp
+namespace Survivors.Bootstrap.RootSystems
+{
+    [UpdateInGroup(typeof(LateSimulationSystemGroup))]
+    public partial class LateSimulationRootSystem : RootSuperSystem
+    {
+        protected override void CreateSystems()
+        {
+            GetOrCreateAndAddUnmanagedSystem<PlayerPositionUpdater>();
+            GetOrCreateAndAddManagedSystem<CinemachineTargetUpdater>();
+        }
+    }
+}
+
+namespace Survivors.Play.Systems.BlackBoard
+{
+    public partial struct PlayerPositionUpdater : ISystem
+    {
+        LatiosWorldUnmanaged m_world;
+
+        [BurstCompile]
+        public void OnCreate(ref SystemState state)
+        {
+            m_world = state.GetLatiosWorldUnmanaged();
+            state.RequireForUpdate<PlayerTag>();
+        }
+
+        [BurstCompile]
+        public void OnUpdate(ref SystemState state)
+        {
+            var playerPosition = float3.zero;
+
+            foreach (var transformAspect in SystemAPI.Query<TransformAspect>()
+                         .WithAll<PlayerTag>())
+                playerPosition = transformAspect.worldTransform.position;
+
+            m_world.sceneBlackboardEntity.SetComponentData(new PlayerPosition
+            {
+                Position = playerPosition
+            });
+        }
+    }
+}
+
+namespace Survivors.Play.Systems.Camera
+{
+    public partial class CinemachineTargetUpdater : SubSystem
+    {
+        CinemachineBehaviour m_cinemachine;
+
+        [Inject]
+        public void Construct(CinemachineBehaviour cinemachine)
+        {
+            m_cinemachine = cinemachine;
+        }
+
+        protected override void OnCreate()
+        {
+            RequireForUpdate<PlayerTag>();
+        }
+
+        protected override void OnUpdate()
+        {
+            var playerPosition = sceneBlackboardEntity.GetComponentData<PlayerPosition>();
+            m_cinemachine.SetTargetPosition(playerPosition.Position);
+        }
+    }
+}
+```
+
+<Video src={frontmatter.baseVideoUrl + "barbarian-movement.mp4"} />
+<Caption>Far from a blockbuster but it works.</Caption>
+
+### Level Design
+
+I'll skip the level design part as I'm not the most qualified person to talk about it.
+
+Here is where I'm stopping for now. It can already make a good test case for *soon to come* pathfinding and enemy AI.
+
+<Picture src={levelV1} alt="Level V1"/>
+<Caption>Some post processing, some lights. Done.</Caption>
+
+## Closing Words
+
+I hope you enjoyed this second part of this walkthrough.
+Next, I'll be working on adding more animations to the player character.
+

@@ -6,11 +6,6 @@ import BackToTop from "@components/BackToTop.astro";
 
 <footer class="animate">
   <Container>
-    <div class="relative">
-      <div class="absolute right-0 -top-20">
-        <BackToTop />
-      </div>
-    </div>
     <div class="flex justify-between items-center">
       <div>
         &copy; {new Date().getFullYear()} {`|`} {SITE.NAME}
@@ -90,3 +85,8 @@ import BackToTop from "@components/BackToTop.astro";
     </div>
   </Container>
 </footer>
+
+<div class="animate fixed 
+  bottom-16 right-8">
+<BackToTop />
+</div>
