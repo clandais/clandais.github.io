@@ -3,9 +3,17 @@ title: "Making a Survivors-like with Latios Framework Part 3"
 date: "Mar 26 2025"
 description: "Where I document my DOTS and Latios Framework learning journey."
 draft: true
+
+baseVideoUrl: "../../vids/blog/latios-survivors-p3/"
 ---
 
 import Link from "@components/Link.astro";
+import Caption from "@components/Caption.astro";
+import Video from "@components/Video.astro";
+import { Picture } from 'astro:assets';
+
+import bigJob from "./img//big-job.jpg";
+
 
 ## Character Animations
 
@@ -14,3 +22,407 @@ For now, since I've implemented the basic movement, I'll make a `FourDirectionCl
 
 It will use a similar approach as in <Link href="../blog/2025-03-20" > Part 1 </Link> with the help of `SmartBlobbers`.
 
+### Authoring
+
+First, I'm creating a struct with five `AnimationClipProperty`.
+```csharp
+    #region Animation Authoring Structs
+
+    [Serializable]
+    public struct FourDirAnimations
+    {
+        public AnimationClipProperty center;
+        public AnimationClipProperty down;
+        public AnimationClipProperty up;
+        public AnimationClipProperty left;
+        public AnimationClipProperty right;
+
+        public bool IsMissingAnimations()
+        {
+            return center.clip == null || down.clip == null || up.clip == null || left.clip == null || right.clip == null;
+        }
+    }
+
+    #endregion
+```
+
+The `IsMissingAnimations` method is used to avoid having constant errors in the editor when the clips are not assigned.
+
+Next, I will need a component to store the actual animations and one that will track their `ClipState`.
+On top of that, I'll be using an enum to refer to the clips' indices.
+
+
+```csharp
+    public struct Clips : IComponentData
+    {
+        public BlobAssetReference<SkeletonClipSetBlob> ClipSet;
+    }
+
+    public struct FourDirectionClipStates : IComponentData
+    {
+        public ClipState Center;
+        public ClipState Down;
+        public ClipState Up;
+        public ClipState Left;
+        public ClipState Right;
+    }
+    
+    public enum EDirections
+    {
+        Center,
+        Down,
+        Up,
+        Left,
+        Right
+    }
+```
+
+Now comes a big chunk of code to bake the animations into a blob.
+
+```csharp
+namespace Survivors.Play.Authoring.Animations
+{
+    public class FourDirectionsAnimationsAuthoring : MonoBehaviour
+    {
+        public FourDirAnimations animations;
+
+        [TemporaryBakingType]
+        struct AnimationClipsSmartBakeItem : ISmartBakeItem<FourDirectionsAnimationsAuthoring>
+        {
+            SmartBlobberHandle<SkeletonClipSetBlob> m_clipSetHandle;
+
+            public bool Bake(FourDirectionsAnimationsAuthoring authoring,
+                IBaker baker)
+            {
+                if (authoring.animations.IsMissingAnimations()) return false;
+
+                var entity = baker.GetEntity(TransformUsageFlags.Dynamic);
+                baker.AddComponent<Clips>(entity);
+
+                var clips = new NativeArray<SkeletonClipConfig>(5, Allocator.Temp);
+
+                for (var i = 0; i < 5; i++)
+                {
+                    AnimationClip clip = null;
+
+                    switch (i)
+                    {
+                        case (int)EDirections.Center:
+                            clip = authoring.animations.center.clip;
+
+                            break;
+                        case (int)EDirections.Down:
+                            clip = authoring.animations.down.clip;
+
+                            break;
+                        case (int)EDirections.Up:
+                            clip = authoring.animations.up.clip;
+
+                            break;
+                        case (int)EDirections.Left:
+                            clip = authoring.animations.left.clip;
+
+                            break;
+                        case (int)EDirections.Right:
+                            clip = authoring.animations.right.clip;
+
+                            break;
+                    }
+
+
+                    clips[i] = new SkeletonClipConfig
+                    {
+                        clip     = clip,
+                        settings = SkeletonClipCompressionSettings.kDefaultSettings
+                    };
+                }
+
+
+                m_clipSetHandle = baker.RequestCreateBlobAsset(baker.GetComponent<Animator>(), clips);
+
+                return true;
+            }
+
+            public void PostProcessBlobRequests(EntityManager entityManager,
+                Entity entity)
+            {
+                var clipSet = m_clipSetHandle.Resolve(entityManager);
+                entityManager.SetComponentData(entity, new Clips { ClipSet = clipSet });
+            }
+        }
+
+
+        class ClipBaker : SmartBaker<FourDirectionsAnimationsAuthoring, AnimationClipsSmartBakeItem> { }
+
+        class FourDirectionsAnimationsAuthoringBaker : Baker<FourDirectionsAnimationsAuthoring>
+        {
+            public override void Bake(FourDirectionsAnimationsAuthoring authoring)
+            {
+                var entity = GetEntity(TransformUsageFlags.Dynamic);
+
+                var clipStates = new FourDirectionClipStates
+                {
+                    Center = new ClipState { SpeedMultiplier = authoring.animations.center.speedMultiplier },
+                    Down   = new ClipState { SpeedMultiplier = authoring.animations.down.speedMultiplier },
+                    Up     = new ClipState { SpeedMultiplier = authoring.animations.up.speedMultiplier },
+                    Left   = new ClipState { SpeedMultiplier = authoring.animations.left.speedMultiplier },
+                    Right  = new ClipState { SpeedMultiplier = authoring.animations.right.speedMultiplier }
+                };
+
+                AddComponent(entity, clipStates);
+            }
+        }
+    }
+}
+
+```
+
+Nothing special in the `Bake` method, just creating a `NativeArray` of `SkeletonClipConfig` and passing it to the `SmartBlobberHandle`.
+The `PostProcessBlobRequests` method is where I set the `ClipSet` to the `Clips` component.
+
+Further down, the `FourDirectionsAnimationsAuthoringBaker` is where I set the `FourDirectionClipStates` component with the speed multipliers.
+
+### Animation System
+
+I'll just remove the `IdleClipAuthoring` and `IdleClipSystem` classes since they are not needed anymore. In place of `IdleClipSystem`'s registration, I'll add a new system that will handle the `FourDirectionClipStates` component.
+
+Here, I'm splitting the code in two parts.
+
+```csharp
+namespace Survivors.Play.Systems.Animations
+{
+    [RequireMatchingQueriesForUpdate]
+    public partial struct FourDirectionsAnimationSystem : ISystem
+    {
+        EntityQuery m_query;
+
+        [BurstCompile]
+        public void OnCreate(ref SystemState state)
+        {
+            m_query = state.Fluent()
+                .WithAspect<OptimizedSkeletonAspect>()
+                .With<Clips>()
+                .With<FourDirectionClipStates>()
+                .With<RigidBody>()
+                .Without<DeadTag>()
+                .Build();
+        }
+
+        [BurstCompile]
+        public void OnUpdate(ref SystemState state)
+        {
+            state.Dependency = new AnimationJob
+            {
+                DeltaTime = SystemAPI.Time.DeltaTime
+            }.ScheduleParallel(m_query, state.Dependency);
+        }
+    
+     // IJobEntity definition goes here
+    }
+}
+```
+<Caption>A system with a BIG query</Caption>
+
+```csharp
+[WithNone(typeof(DeadTag))]
+[BurstCompile]
+internal partial struct AnimationJob : IJobEntity
+{
+    [ReadOnly] public float DeltaTime;
+
+    public void Execute(
+        OptimizedSkeletonAspect skeleton,
+        in RigidBody rigidBody,
+        in Clips clips,
+        ref FourDirectionClipStates clipStates
+    )
+    {
+        // Get the normalized movement direction in local space
+        var velocity = math.mul(skeleton.skeletonWorldTransform.rotation, rigidBody.velocity.linear).xz;
+        var magnitude = math.length(velocity);
+        var rotatedVelocity = magnitude > math.EPSILON ? velocity / magnitude : float2.zero;
+
+
+        // Calculate blend weights
+        var centerWeight = math.max(0, 1f - magnitude * 2f); // Idle when not moving
+        centerWeight = math.clamp(centerWeight, 0f, 1f);
+
+        var upWeight = math.smoothstep(0.0f, 0.5f, rotatedVelocity.y);
+        var downWeight = math.smoothstep(0.0f, 0.5f, -rotatedVelocity.y);
+        var rightWeight = math.smoothstep(0.0f, 0.5f, rotatedVelocity.x);
+        var leftWeight = math.smoothstep(0.0f, 0.5f, -rotatedVelocity.x);
+
+        // Normalize directional weights (excluding center)
+        var directionalSum = upWeight + downWeight + leftWeight + rightWeight;
+
+        if (directionalSum > math.EPSILON)
+        {
+            var normalizer = (1f - centerWeight) / directionalSum;
+            upWeight    *= normalizer;
+            downWeight  *= normalizer;
+            leftWeight  *= normalizer;
+            rightWeight *= normalizer;
+        }
+
+
+        // Update and sample animations
+        UpdateClipState(ref clipStates.Center, ref clips.ClipSet.Value.clips[(int)EDirections.Center], DeltaTime, centerWeight);
+        UpdateClipState(ref clipStates.Up, ref clips.ClipSet.Value.clips[(int)EDirections.Up], DeltaTime, upWeight);
+        UpdateClipState(ref clipStates.Down, ref clips.ClipSet.Value.clips[(int)EDirections.Down], DeltaTime, downWeight);
+        UpdateClipState(ref clipStates.Left, ref clips.ClipSet.Value.clips[(int)EDirections.Left], DeltaTime, leftWeight);
+        UpdateClipState(ref clipStates.Right, ref clips.ClipSet.Value.clips[(int)EDirections.Right], DeltaTime, rightWeight);
+
+        // Sample animations
+        SampleAnimation(ref skeleton, ref clips.ClipSet.Value.clips[(int)EDirections.Center], clipStates.Center, centerWeight);
+        SampleAnimation(ref skeleton, ref clips.ClipSet.Value.clips[(int)EDirections.Up], clipStates.Up, upWeight);
+        SampleAnimation(ref skeleton, ref clips.ClipSet.Value.clips[(int)EDirections.Down], clipStates.Down, downWeight);
+        SampleAnimation(ref skeleton, ref clips.ClipSet.Value.clips[(int)EDirections.Left], clipStates.Left, leftWeight);
+        SampleAnimation(ref skeleton, ref clips.ClipSet.Value.clips[(int)EDirections.Right], clipStates.Right, rightWeight);
+
+        // Finish sampling
+        skeleton.EndSamplingAndSync();
+    }
+
+    static void UpdateClipState(ref ClipState state,
+        ref SkeletonClip clip,
+        float deltaTime,
+        float weight)
+    {
+        if (weight > math.EPSILON)
+        {
+            state.Update(deltaTime * state.SpeedMultiplier);
+            state.Time = clip.LoopToClipTime(state.Time);
+        }
+    }
+
+    static void SampleAnimation(ref OptimizedSkeletonAspect skeleton,
+        ref SkeletonClip clip,
+        ClipState state,
+        float weight)
+    {
+        if (weight > math.EPSILON) clip.SamplePose(ref skeleton, state.Time, weight);
+    }
+}
+```
+
+<Picture src={bigJob} width={350} height={350} alt="Big Job"/>
+<Caption>A Big Job</Caption>
+
+
+<Video src={frontmatter.baseVideoUrl + "barbarian-anims-1.mp4"}/>
+<Caption>Result</Caption>
+
+I don't like the way the character transition to the idle animation. Thankfully, Kinemation has an implementation of "Inertial Blending".
+
+Inertial Blending is pretty neat for smoothly transitioning between animations. Especially when the two animations have dramatic differences. Like when transitioning from running to idle.
+
+Here is a link to a GDC talk by Gears of War 4 developers presenting it: [Inertialization: High-Performance Animation Transitions in Gears of War](https://www.youtube.com/watch?v=BYyv4KTegJI).
+
+### Inertial Blending
+
+To make it work, Kinemation's `OptimizedSkeletonAspect` has two "methods" :
+-  `StartNewInertialBlend(float previousDeltaTime, float maxBlendDurationStartingFromTimeOfPrevious)` : Starts a new inertial blend.
+-  `InertialBlend(float timeSinceStartOfBlend)` : Updates the blend with the time since it started.
+
+I'll need a component that stores the blend duration and a velocity change threshold to start the blend.
+I'll use the same component to track the elapsed time in inertialization and stores the previous delta time before the call to `StartNewInertialBlend`.
+
+```csharp
+public struct InertialBlendState : IComponentData
+{
+    public readonly float Duration;
+    public readonly float VelocityChangeThreshold;
+    public float TimeInCurrentState;
+    public float PreviousDeltaTime;
+
+    public InertialBlendState(float duration,
+        float velocityChangeThreshold)
+    {
+        Duration                = duration;
+        VelocityChangeThreshold = velocityChangeThreshold;
+        TimeInCurrentState      = 0f;
+        PreviousDeltaTime        = 0f;
+    }
+}
+```
+To check for velocity changes, I'm adding a `PreviousVelocity`component that will be updated
+in the `PlayerMovementSystem`, assigning it the RigidBody's linear velocity just before I change it.
+
+I'm adding two fields in `FourDirectionsAnimationsAuthoring`and assign them in the baker.
+    
+```csharp
+namespace Survivors.Play.Authoring.Animations
+{
+    public class FourDirectionsAnimationsAuthoring : MonoBehaviour
+    {
+        /*
+        *  other fields
+        */
+
+        [SerializeField] float intertialBlendDuration = 0.15f;
+        [SerializeField] float velocityChangeThreshold = 0.1f;
+
+        /*
+        * ISmartBakeItem implementation
+        */
+
+        class FourDirectionsAnimationsAuthoringBaker : Baker<FourDirectionsAnimationsAuthoring>
+        {
+            public override void Bake(FourDirectionsAnimationsAuthoring authoring)
+            {
+                /*
+                * same as before
+                */
+                AddComponent(entity, 
+                    new InertialBlendState(
+                        authoring.intertialBlendDuration,
+                        authoring.velocityChangeThreshold));
+            }
+        }
+    }
+}
+```
+
+At the end of the `AnimationJob`, just before `skeleton.EndSamplingAndSync()` and after sampling the animations:
+
+
+```csharp
+// Detect significant direction/movement change (for starting new blend)
+var significantChange = math.length(velocity - previousVelocity.Value.xz) > inertialBlendState.VelocityChangeThreshold;
+
+// Start new inertial blend when movement changes significantly
+if (significantChange && centerWeight > 0f)
+{
+    skeleton.StartNewInertialBlend(inertialBlendState.PreviousDeltaTime, inertialBlendState.Duration);
+    inertialBlendState.TimeInCurrentState = 0f;
+}
+
+
+// Apply inertial blend with current time since blend started
+if (inertialBlendState.TimeInCurrentState <= inertialBlendState.Duration)
+{
+    inertialBlendState.TimeInCurrentState += DeltaTime;
+    skeleton.InertialBlend(inertialBlendState.TimeInCurrentState);
+}
+
+
+// Finish sampling
+skeleton.EndSamplingAndSync();
+
+inertialBlendState.PreviousDeltaTime = DeltaTime;
+```
+
+<Video src={frontmatter.baseVideoUrl + "barbarian-inertia.mp4"}/>
+<Caption>Subtle but nice!</Caption>
+
+## More movements and actions
+
+Goals:
+- Have a crosshair that follows the mouse position.
+- Have the character rotate towards the mouse position.
+- Have the character throw an axe in the direction of the mouse position.
+
+### Crosshair
+I'm adding a new Canvas into the "PlayScene" without any `Graphics Raycaster` and dropping a crosshair sprite from Kenney's "crosshair pack".
+
+I'm adding a new serialized filed in the `PlayLifetimeScope` and register the crosshair image for injection.

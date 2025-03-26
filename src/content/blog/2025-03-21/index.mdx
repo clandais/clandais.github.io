@@ -25,7 +25,7 @@ import capsuleBarbarian from './img/capsule-barbarian.png';
 import cinemachineSpline from './img/cinemachine-spline.png';
 import levelV1 from './img/level-v1.png';
 
-Making the Character Move
+# Making the Character Move
 
 This time around, I will be focusing on the character movement.
 I will be using Psyshock and Anna.
@@ -43,7 +43,7 @@ Psyshock is one of Latios' modules. As described in the documentation:
 
 > Anna is a simple out-of-the-box rigid body physics engine built on Psyshock’s UnitySim APIs. It is intended to be general-purpose, striking a balance between performance, flexibility, and most importantly, ease-of-use.
 
-Dispite Anna being a pretty recent AddOn for Latios and being in early development, it is already very powerful and easy to use.
+Despite Anna being a pretty recent AddOn for Latios and being in early development, it is already very powerful and easy to use.
 
 
 Before I go any further, I need to add a new scripting define to the project to enable Anna : `LATIOS_ADDON_ANNA` and bootstrap it in the `LatiosBoostrap` class.
@@ -73,7 +73,8 @@ The settings `Subdivisions Per Axis`have been chosen based on these recommendati
 
 The `Subdivisions Per Axis` are set to `(1, 1, 8)` because I want to have a top-down game with a large mostly-flat world.
 
-Since I'm having a hard time visualizing the World Bounds, I've writtent this msall editor scrolling script to help me out:
+Since I'm having a hard time visualizing the World Bounds,
+ I've written this msall editor script to help me out:
 
 ```csharp
 namespace Survivors.Editor.Anna
@@ -101,8 +102,8 @@ namespace Survivors.Editor.Anna
 ### Making a base level
 
 Still using KayKit's assets, I'm picking a floor tile and a wall tile.
-Then, I'm creating a new subscene with an exceptionally orgiginal name : `Level`.
-Finally, I'm adding a root game object that will hold 2 scripts.
+Then, I'm creating a new subscene with an exceptionally original name : `Level`.
+Finally, I'm adding a root game object that will hold two scripts.
 
 
 <Picture src={levelCollision} alt="Level Collision"/>
@@ -111,9 +112,10 @@ Let's break it down:
 - `Custom Collider`is a Psyshock authoring script. I've set the `Collider Type` to `Compound` and cheked `Generate From Children` so that it will generate a compound collider from the children of the game object (obviously).
 - `Collision Tag Authoring` is an Anna authoring script. Set to `Include Evironment Self Only`. It will add an `EnvironmentCollisionTag` to the baked entity, automatically generate an `EnvironmentCollisionLayer`, add it to the `sceneBlackBoardEntity` (so we can query it) and update it in `BuildEnvironmentCollisionLayerSystem`.  
 
-Anna can generate colliders recursively but, since I have a compound collider, I don't need to do that.
+Anna can generate colliders recursively but,
+ since I have a compound collider, I don't need to do that.
 
-Here is the kind of setup I have for a floot tile:
+Here is the kind of setup I have for a floor tile:
 <Picture src={floorTile} alt="Floor Tile"/>
 <Caption>I'm adding an empty parent to have the pivot point in a corner. It will save me some level design time with the help of snapping.</Caption>
 

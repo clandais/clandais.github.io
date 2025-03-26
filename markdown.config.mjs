@@ -7,7 +7,15 @@ export default {
     remarkPlugins: [remarkGfm],
     rehypePlugins: [
         rehypeSlug,
-        [rehypeAutolinkHeadings, { behavior: 'wrap' }],
-        rehypeToc,
+        [rehypeAutolinkHeadings, { 
+            behavior: 'wrap',
+            headings: ['h2', 'h3'],
+             
+        }],
+        [rehypeToc, {
+            headings: ['h2', 'h3'],
+            cssClasses: ['toc'],
+        }]
+        
     ],
 };
