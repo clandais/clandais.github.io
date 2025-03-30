@@ -1,0 +1,27 @@
+---
+title: "DOTS"
+description: "Stuff made with DOTS and Latios learning."
+date: "Jan 21 2025"
+repoURL: 'https://github.com/clandais/DOTS-training-samples/tree/master/Ported'
+baseVideoUrl: "../../vids/blog/latios-survivors-p1/"
+---
+
+
+import Video from '../../../components/Video.astro';
+
+
+In my early stages of exploring Unity’s Data-Oriented Technology Stack (DOTS).
+It has been an exciting yet challenging learning experience.
+Coming from a traditional object-oriented programming (OOP) background, adapting to DOTS has required a significant shift in mindset—thinking in terms of data layout,
+ parallel processing, and performance-first design principles.
+
+
+# Featured Project: Ant Pheromone Simulation
+
+- **Overview**: A large-scale simulation of ant behavior using DOTS principles.
+    - **Key Achievements**:
+        - Optimized performance to handle **100,000 ants** on a laptop and **250,000 ants** on a workstation.
+        - Implemented steering behaviors and a quad-tree system for obstacle management.
+    - **Challenges Overcomed**: Debugging issues like improper vector normalization (`math.normalize` vs. `math.normalizesafe`).
+
+<Video src={frontmatter.baseVideoUrl + 'mesmerizants.mp4'} />
