@@ -71,3 +71,65 @@ html #back-to-top {
 html.scrolled #back-to-top {
   @apply opacity-100 pointer-events-auto;
 }
+
+.line {
+  display: inline-block;
+  width: 100%;
+}
+
+
+
+/* transformerNotationDiff */
+.line.diff.add {
+  background-color: #0505;
+}
+.line.diff.remove {
+  background-color: #8005;
+}
+.line.diff.add:before {
+  content: '+ ';
+  opacity: 0.6;
+}
+.line.diff.remove:before {
+  content: '- ';
+  opacity: 0.6;
+}
+
+/* transformerNotationHighlight */
+.line.highlighted {
+  background-color: #85858556;
+}
+
+/* transformerNotationWordHighlight */
+.highlighted-word {
+  background-color: #85858556;
+}
+
+/* transformerNotationFocus */
+.has-focused .line {
+  filter: blur(0.06rem);
+}
+.has-focused .focused {
+  filter: blur(0);
+}
+
+/* transformerNotationErrorLevel */
+.line.highlighted.error {
+  background-color: #72000075;
+}
+.line.highlighted.warning {
+  background-color: #964b0075;
+}
+
+/* transformerRenderWhitespace */
+.tab::before {
+  content: '⇥';
+  position: absolute;
+  opacity: 0.6;
+}
+
+.space::before {
+  content: '.';
+  position: absolute;
+  opacity: 0.6;
+}

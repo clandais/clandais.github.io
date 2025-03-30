@@ -46,7 +46,7 @@ Psyshock is one of Latios' modules. As described in the documentation:
 Despite Anna being a pretty recent AddOn for Latios and being in early development, it is already very powerful and easy to use.
 
 
-Before I go any further, I need to add a new scripting define to the project to enable Anna : `LATIOS_ADDON_ANNA` and bootstrap it in the `LatiosBoostrap` class.
+Before I go any further, I need to add a new scripting define to the project to enable Anna : `LATIOS_ADDON_ANNA` and bootstrap it in the `LatiosBootstrap` class.
 ```csharp
 // Easy !
 Latios.Anna.AnnaBootstrap.InstallAnna(world);
@@ -74,7 +74,7 @@ The settings `Subdivisions Per Axis`have been chosen based on these recommendati
 The `Subdivisions Per Axis` are set to `(1, 1, 8)` because I want to have a top-down game with a large mostly-flat world.
 
 Since I'm having a hard time visualizing the World Bounds,
- I've written this msall editor script to help me out:
+ I've written this small editor script to help me out:
 
 ```csharp
 namespace Survivors.Editor.Anna
@@ -109,8 +109,8 @@ Finally, I'm adding a root game object that will hold two scripts.
 <Picture src={levelCollision} alt="Level Collision"/>
 
 Let's break it down:
-- `Custom Collider`is a Psyshock authoring script. I've set the `Collider Type` to `Compound` and cheked `Generate From Children` so that it will generate a compound collider from the children of the game object (obviously).
-- `Collision Tag Authoring` is an Anna authoring script. Set to `Include Evironment Self Only`. It will add an `EnvironmentCollisionTag` to the baked entity, automatically generate an `EnvironmentCollisionLayer`, add it to the `sceneBlackBoardEntity` (so we can query it) and update it in `BuildEnvironmentCollisionLayerSystem`.  
+- `Custom Collider`is a Psyshock authoring script. I've set the `Collider Type` to `Compound` and checked `Generate From Children` so that it will generate a compound collider from the children of the game object (obviously).
+- `Collision Tag Authoring` is an Anna authoring script. Set to `Include environment Self Only`. It will add an `EnvironmentCollisionTag` to the baked entity, automatically generate an `EnvironmentCollisionLayer`, add it to the `sceneBlackBoardEntity` (so we can query it) and update it in `BuildEnvironmentCollisionLayerSystem`.  
 
 Anna can generate colliders recursively but,
  since I have a compound collider, I don't need to do that.
@@ -187,7 +187,7 @@ Let's move up the barbarian authoring Game Object, save the scenes and run the g
 
 ## Input and Player Movement
 
-I've been reading this part of the documentation entitled "How To Make an N – 1 Render Loop" [*here*](https://github.com/Dreaming381/Latios-Framework-Documentation/blob/main/Core/How%20To%20Make%20an%20N%20-%201%20Render%20Loop.md). From what I understand, it means that explicitely ordering your systems in a random fashion would be suboptimal.
+I've been reading this part of the documentation entitled "How To Make an N – 1 Render Loop" [*here*](https://github.com/Dreaming381/Latios-Framework-Documentation/blob/main/Core/How%20To%20Make%20an%20N%20-%201%20Render%20Loop.md). From what I understand, it means that explicitly ordering your systems in a random fashion would be suboptimal.
 
 
 ### Input System
@@ -261,7 +261,7 @@ namespace Survivors.Play.Authoring
 }
 ```
 
-Finaly, I'll create the `PlayerInputSystem` that will read the input and update the `PlayerInputState` component.
+Finally, I'll create the `PlayerInputSystem` that will read the input and update the `PlayerInputState` component.
 ```csharp
 namespace Survivors.Play.Systems.Input
 {
@@ -405,7 +405,7 @@ namespace Survivors.Utilities
 }
 ```
 
-Now, we can add it to some system hierachy.
+Now, we can add it to some system hierarchy.
 
 ```csharp
 namespace Survivors.Bootstrap.RootSystems
@@ -447,13 +447,15 @@ namespace Survivors.Bootstrap.RootSystems.SuperSystems
 ### Issue
 
 If we play the game and press pause...
-The `PlayerMovementSystem` will not run, it will nor update the RigidBody velicty but the physics simulation will still run and the player will be able to move.
+The `PlayerMovementSystem` will not run, it will nor update the RigidBody velocity but the physics simulation will still run and the player will be able to move.
 
 To solve this, I first tried to override `AnnaSuperSystem` and used the `ShouldUpdateSystem()` method to check if the game is paused or not.
 Sadly, when Anna's simulation is paused, a lot of errors are thrown in the console.
 
 A wild guess : most of the operations run by Anna are using multithreaded Pyshsock jobs that may or may not be completed when the simulation is paused,
-thus the errors complaining about "disposed arrays" and "layers" being "differents".
+thus the errors complaining about "disposed arrays" and "layers" being "different".
+
+*Update Mar 30 2025: It was a bug "around collision layer allocation lifecycles"*
 
 ### Hacking
 
