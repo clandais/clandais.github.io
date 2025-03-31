@@ -2,18 +2,31 @@
 title: "Making a Survivors-like with Latios Framework Part 3"
 date: "Mar 26 2025"
 description: "Where I document my DOTS and Latios Framework learning journey."
-draft: true
+draft: false
 
 baseVideoUrl: "../../vids/blog/latios-survivors-p3/"
 ---
 
+import CodeAccordion from "@components/CodeAccordion.astro";
 import Link from "@components/Link.astro";
 import Caption from "@components/Caption.astro";
 import Video from "@components/Video.astro";
 import { Picture } from 'astro:assets';
 
 import bigJob from "./img//big-job.jpg";
+import crosshair from "./img/crosshair.png";
+import animationEvent from "./img/animation-event.png";
+import axeSetup from "./img/axe-setup.png";
 
+
+
+Goals:
+- Have the character play locomotion animations based on the movement direction.
+- Have a crosshair that follows the mouse position.
+- Have the character rotate towards the mouse position.
+- Have the character throw an axe in the direction of the mouse position.
+
+<Caption>Introducing : "Code Accordions"!</Caption>
 
 ## Character Animations
 
@@ -25,32 +38,34 @@ It will use a similar approach as in <Link href="../blog/2025-03-20" > Part 1 </
 ### Authoring
 
 First, I'm creating a struct with five `AnimationClipProperty`.
+
+
 ```csharp
-    #region Animation Authoring Structs
+  #region Animation Authoring Structs
 
-    [Serializable]
-    public struct FourDirAnimations
-    {
-        public AnimationClipProperty center;
-        public AnimationClipProperty down;
-        public AnimationClipProperty up;
-        public AnimationClipProperty left;
-        public AnimationClipProperty right;
+  [Serializable]
+  public struct FourDirAnimations
+  {
+      public AnimationClipProperty center;
+      public AnimationClipProperty down;
+      public AnimationClipProperty up;
+      public AnimationClipProperty left;
+      public AnimationClipProperty right;
 
-        public bool IsMissingAnimations()
-        {
-            return center.clip == null || down.clip == null || up.clip == null || left.clip == null || right.clip == null;
-        }
-    }
+      public bool IsMissingAnimations()
+      {
+          return center.clip == null || down.clip == null || up.clip == null || left.clip == null || right.clip == null;
+      }
+  }
 
-    #endregion
+  #endregion
 ```
+
 
 The `IsMissingAnimations` method is used to avoid having constant errors in the editor when the clips are not assigned.
 
 Next, I will need a component to store the actual animations and one that will track their `ClipState`.
 On top of that, I'll be using an enum to refer to the clips' indices.
-
 
 ```csharp
     public struct Clips : IComponentData
@@ -79,6 +94,7 @@ On top of that, I'll be using an enum to refer to the clips' indices.
 
 Now comes a big chunk of code to bake the animations into a blob.
 
+<CodeAccordion title="FourDirectionsAnimationsAuthoring.cs">
 ```csharp
 namespace Survivors.Play.Authoring.Animations
 {
@@ -176,6 +192,7 @@ namespace Survivors.Play.Authoring.Animations
 }
 
 ```
+</CodeAccordion>
 
 Nothing special in the `Bake` method, just creating a `NativeArray` of `SkeletonClipConfig` and passing it to the `SmartBlobberHandle`.
 The `PostProcessBlobRequests` method is where I set the `ClipSet` to the `Clips` component.
@@ -188,6 +205,7 @@ I'll just remove the `IdleClipAuthoring` and `IdleClipSystem` classes since they
 
 Here, I'm splitting the code in two parts.
 
+<CodeAccordion title="FourDirectionsAnimationSystem.cs">
 ```csharp
 namespace Survivors.Play.Systems.Animations
 {
@@ -221,8 +239,10 @@ namespace Survivors.Play.Systems.Animations
     }
 }
 ```
+</CodeAccordion>
 <Caption>A system with a BIG query</Caption>
 
+<CodeAccordion title="FourDirectionsAnimationSystem.cs">
 ```csharp
 [WithNone(typeof(DeadTag))]
 [BurstCompile]
@@ -232,23 +252,26 @@ internal partial struct AnimationJob : IJobEntity
 
     public void Execute(
         OptimizedSkeletonAspect skeleton,
+        in WorldTransform worldTransform,
         in RigidBody rigidBody,
         in Clips clips,
-        ref FourDirectionClipStates clipStates
+        in PreviousVelocity previousVelocity,
+        ref FourDirectionClipStates clipStates,
+        ref InertialBlendState inertialBlendState
     )
     {
-        // Get the normalized movement direction in local space
-        var velocity = math.mul(skeleton.skeletonWorldTransform.rotation, rigidBody.velocity.linear).xz;
-        var magnitude = math.length(velocity);
-        var rotatedVelocity = magnitude > math.EPSILON ? velocity / magnitude : float2.zero;
 
+        // Get Local Velocity
+        var velocity =  math.mul(math.inverse(worldTransform.rotation), rigidBody.velocity.linear);
+        var magnitude = math.length(velocity);
+        var rotatedVelocity = math.normalizesafe(velocity);
 
         // Calculate blend weights
         var centerWeight = math.max(0, 1f - magnitude * 2f); // Idle when not moving
         centerWeight = math.clamp(centerWeight, 0f, 1f);
 
-        var upWeight = math.smoothstep(0.0f, 0.5f, rotatedVelocity.y);
-        var downWeight = math.smoothstep(0.0f, 0.5f, -rotatedVelocity.y);
+        var upWeight = math.smoothstep(0.0f, 0.5f, rotatedVelocity.z);
+        var downWeight = math.smoothstep(0.0f, 0.5f, -rotatedVelocity.z);
         var rightWeight = math.smoothstep(0.0f, 0.5f, rotatedVelocity.x);
         var leftWeight = math.smoothstep(0.0f, 0.5f, -rotatedVelocity.x);
 
@@ -304,9 +327,11 @@ internal partial struct AnimationJob : IJobEntity
     }
 }
 ```
+</CodeAccordion>
+<Caption>A Big Job</Caption>
 
 <Picture src={bigJob} width={350} height={350} alt="Big Job"/>
-<Caption>A Big Job</Caption>
+<Caption>Another Big Job</Caption>
 
 
 <Video src={frontmatter.baseVideoUrl + "barbarian-anims-1.mp4"}/>
@@ -327,6 +352,7 @@ To make it work, Kinemation's `OptimizedSkeletonAspect` has two "methods" :
 I'll need a component that stores the blend duration and a velocity change threshold to start the blend.
 I'll use the same component to track the elapsed time in inertialization and stores the previous delta time before the call to `StartNewInertialBlend`.
 
+
 ```csharp
 public struct InertialBlendState : IComponentData
 {
@@ -345,53 +371,65 @@ public struct InertialBlendState : IComponentData
     }
 }
 ```
+
 To check for velocity changes, I'm adding a `PreviousVelocity`component that will be updated
 in the `PlayerMovementSystem`, assigning it the RigidBody's linear velocity just before I change it.
 
 I'm adding two fields in `FourDirectionsAnimationsAuthoring`and assign them in the baker.
-    
+
+<CodeAccordion title="FourDirectionsAnimationsAuthoring.cs">
 ```csharp
 namespace Survivors.Play.Authoring.Animations
 {
     public class FourDirectionsAnimationsAuthoring : MonoBehaviour
     {
-        /*
-        *  other fields
-        */
 
-        [SerializeField] float intertialBlendDuration = 0.15f;
-        [SerializeField] float velocityChangeThreshold = 0.1f;
+        public FourDirAnimations animations;
+        [SerializeField] float intertialBlendDuration = 0.15f;      // [!code ++]
+        [SerializeField] float velocityChangeThreshold = 0.1f;      // [!code ++]
 
         /*
         * ISmartBakeItem implementation
+        * [...]
         */
 
         class FourDirectionsAnimationsAuthoringBaker : Baker<FourDirectionsAnimationsAuthoring>
         {
             public override void Bake(FourDirectionsAnimationsAuthoring authoring)
             {
-                /*
-                * same as before
-                */
-                AddComponent(entity, 
-                    new InertialBlendState(
-                        authoring.intertialBlendDuration,
-                        authoring.velocityChangeThreshold));
+                var entity = GetEntity(TransformUsageFlags.Dynamic);
+                var clipStates = new FourDirectionClipStates
+                {
+                    Center = new ClipState { SpeedMultiplier = authoring.animations.center.speedMultiplier },
+                    Down   = new ClipState { SpeedMultiplier = authoring.animations.down.speedMultiplier },
+                    Up     = new ClipState { SpeedMultiplier = authoring.animations.up.speedMultiplier },
+                    Left   = new ClipState { SpeedMultiplier = authoring.animations.left.speedMultiplier },
+                    Right  = new ClipState { SpeedMultiplier = authoring.animations.right.speedMultiplier }
+                };
+
+                AddComponent(entity, clipStates);
+   
+                AddComponent(entity,                            // [!code ++]
+                    new InertialBlendState(                     // [!code ++]
+                        authoring.intertialBlendDuration,       // [!code ++]
+                        authoring.velocityChangeThreshold));    // [!code ++]
             }
         }
     }
 }
 ```
+</CodeAccordion>
 
 At the end of the `AnimationJob`, just before `skeleton.EndSamplingAndSync()` and after sampling the animations:
 
 
 ```csharp
 // Detect significant direction/movement change (for starting new blend)
-var significantChange = math.length(velocity - previousVelocity.Value.xz) > inertialBlendState.VelocityChangeThreshold;
+var significantChange = math.abs( 
+    math.length(velocity)  - math.length( previousVelocity.Value.xz)) > inertialBlendState.VelocityChangeThreshold;
 
 // Start new inertial blend when movement changes significantly
-if (significantChange && centerWeight > 0f)
+if (significantChange)
 {
     skeleton.StartNewInertialBlend(inertialBlendState.PreviousDeltaTime, inertialBlendState.Duration);
     inertialBlendState.TimeInCurrentState = 0f;
@@ -412,17 +450,1024 @@ skeleton.EndSamplingAndSync();
 inertialBlendState.PreviousDeltaTime = DeltaTime;
 ```
 
+
 <Video src={frontmatter.baseVideoUrl + "barbarian-inertia.mp4"}/>
 <Caption>Subtle but nice!</Caption>
 
-## More movements and actions
-
-Goals:
-- Have a crosshair that follows the mouse position.
-- Have the character rotate towards the mouse position.
-- Have the character throw an axe in the direction of the mouse position.
+## More movements
 
 ### Crosshair
 I'm adding a new Canvas into the "PlayScene" without any `Graphics Raycaster` and dropping a crosshair sprite from Kenney's "crosshair pack".
 
-I'm adding a new serialized filed in the `PlayLifetimeScope` and register the crosshair image for injection.
+Next, I'm adding a new serialized field in the `PlayLifetimeScope` and register the crosshair image for injection.
+
+
+```csharp
+namespace Survivors.Play.Scope
+{
+    public struct MousePositionCommand : ICommand
+    {
+        public float2 MousePosition;
+    }
+}
+```
+<Caption>This command will be used to notify the PlayStateRouter from the PlayerInputSystem</Caption>
+
+<CodeAccordion title="PlayerInputSystem.cs">
+```csharp
+namespace Survivors.Play.Systems.Input
+{
+    [RequireMatchingQueriesForUpdate]
+    public partial class PlayerInputSystem : SubSystem
+    {
+        InputSystem_Actions m_inputActions;
+        EntityQuery m_Query;
+        UnityEngine.Camera m_mainCamera;
+
+        ICommandPublisher m_commandPublisher;                       // [!code ++]
+
+        [Inject]                                                    // [!code ++] 
+        public void Construct(ICommandPublisher commandPublisher)   // [!code ++]
+        {                                                           // [!code ++]
+            m_commandPublisher = commandPublisher;                  // [!code ++]
+        }                                                           // [!code ++]
+
+        /*
+        * Other methods
+        */
+
+        protected override void OnUpdate()
+        {
+            var move = m_inputActions.Player.Move.ReadValue<Vector2>();
+            if (math.length(move) > 0.01f) move = math.normalize(move);
+
+            float2 mousePosition = m_inputActions.Player.MousePosition.ReadValue<Vector2>(); // [!code ++]
+// [!code ++]
+            m_commandPublisher.PublishAsync(new MousePositionCommand // [!code ++]
+            {   // [!code ++]
+                MousePosition = mousePosition   // [!code ++]
+            }); // [!code ++]
+
+
+            sceneBlackboardEntity.SetComponentData(new PlayerInputState
+            {
+                Direction = move
+            });
+        }
+    }
+}
+```
+</CodeAccordion> 
+<Caption>Updated PlayerInputSystem</Caption>
+
+I'm adding a similar command for the Router -> Controller communication.
+
+```csharp
+    public struct MousePositionChangedCommand : ICommand
+    {
+        public float2 Position;
+    }
+```
+
+... And a new Route to the Router ...
+```csharp
+    [Route]
+    async UniTask On(MousePositionCommand cmd)
+    {
+        await commandPublisher.PublishAsync(new MousePositionChangedCommand
+        {
+            Position = cmd.MousePosition,
+        });
+    }
+```	
+
+... A new subscription to the `PlayStateController`...
+```csharp
+    [Inject] Image m_crosshair;
+
+    // -----------------
+
+    // In Start()
+    m_commandSubscribable.Subscribe<MousePositionChangedCommand>(OnMousePositionChanged)
+        .AddTo(ref m_disposable);
+
+    // -----------------
+
+    void OnMousePositionChanged(MousePositionChangedCommand cmd,
+        PublishContext ctx)
+    {
+        m_crosshair.rectTransform.position = new Vector3(cmd.Position.x, cmd.Position.y, 0);
+    }
+
+```
+
+We now have a crosshair that follows the mouse position.
+<Picture src={crosshair} alt="Crosshair"/>
+
+### Character Rotation
+
+First, I'll had a property ro the `PlayerInputState` to store the mouse position in world space.
+```csharp
+public struct PlayerInputState : IComponentData
+{
+    public float2 Direction;
+    public float3 MousePosition;
+}
+```
+
+Next, I'm updating the `PlayerInputSystem`: it grabs a reference to `Camera.main`in `OnCreate`, then, before setting the component to the scene blackboard entity, I'll cast a ray to a plane and get back the hit point in world space.
+
+```csharp
+
+// PlayerInputSystem.cs
+
+var ray = m_mainCamera.ScreenPointToRay(new float3(mousePosition.x, mousePosition.y, 0f));
+var plane = new Plane(Vector3.up, Vector3.zero);
+
+if (plane.Raycast(ray, out var enter))
+{
+    float3 hitPoint = ray.GetPoint(enter);
+    inputState.MousePosition = new float3(hitPoint.x, 0f, hitPoint.z);
+}
+```
+
+Before adding player rotation, here is a useful extension method for Unity.Mathematics.quaternion reimplemented from UnityEngine.Quaternion:
+
+```csharp
+namespace Survivors.Utilities
+{
+    public static class QuaternionExtensions
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static quaternion RotateTowards(this quaternion from,
+            quaternion to,
+            float maxDegreesDelta)
+        {
+            return math.slerp(from, to, math.radians(maxDegreesDelta));
+        }
+    }
+}
+```
+
+Last step: updating `PlayerMovementSystem` to handle the rotation!
+```csharp
+var lookDir = playerInputState.MousePosition - transformAspect.worldPosition;
+var lookRotation = quaternion.LookRotationSafe(lookDir, math.up());
+transformAspect.worldRotation = transformAspect.worldRotation.RotateTowards(lookRotation, movementSettings.ValueRO.maxAngleDelta * deltaTime);
+```
+
+Aaaaannnd.... Done.
+
+<Video src={frontmatter.baseVideoUrl + "barbarian-rotating.mp4"}/>
+<Caption>Rotation around the clock</Caption>
+
+## Throwing stuff
+
+Let's throw some axes!
+
+![Some gif](https://media1.tenor.com/m/0I33jQKe6ocAAAAC/vikings-rollo.gif)
+
+### Input
+
+I'd like to have the character throw a BIG axe in the direction of the mouse position.
+
+As a first step, let's listen for the left click.
+
+I need to modify the `PlayerInputState`
+```csharp
+    public struct PlayerInputState : IComponentData
+    {
+        public float2 Direction;
+        public float3 MousePosition;
+        public bool AttackTriggered;    // [!code ++]
+    }
+```
+
+Then listen to the left click in the `PlayerInputSystem`:
+
+<CodeAccordion title="PlayerInputSystem.cs">
+```csharp
+        protected override void OnCreate()
+        {
+            m_inputActions = new InputSystem_Actions();
+            m_inputActions.Enable();
+
+            m_Query = Fluent
+                .With<PlayerInputState>()
+                .Build();
+
+            m_mainCamera = UnityEngine.Camera.main;
+            
+            m_inputActions.Player.Attack.performed += AttackPerformed; // [!code ++]
+            
+        }
+
+        protected override void OnDestroy()
+        {
+            m_inputActions.Player.Attack.performed -= AttackPerformed; // [!code ++]
+            m_inputActions.Disable();
+        }
+        
+        void AttackPerformed(InputAction.CallbackContext _) // [!code ++]
+        {   // [!code ++]   
+            _attackTriggered = true; // [!code ++]
+        } // [!code ++]
+
+        protected override void OnUpdate()
+        {
+            var inputState = new PlayerInputState();
+
+            var move = m_inputActions.Player.Move.ReadValue<Vector2>();
+            if (math.length(move) > 0.01f) move = math.normalize(move);
+
+            inputState.Direction = move;
+
+            float2 mousePosition = m_inputActions.Player.MousePosition.ReadValue<Vector2>();
+
+            m_commandPublisher.PublishAsync(new MousePositionCommand
+            {
+                MousePosition = mousePosition
+            });
+
+
+            var ray = m_mainCamera.ScreenPointToRay(new float3(mousePosition.x, mousePosition.y, 0f));
+            var plane = new Plane(Vector3.up, Vector3.zero);
+
+            if (plane.Raycast(ray, out var enter))
+            {
+                float3 hitPoint = ray.GetPoint(enter);
+                inputState.MousePosition = new float3(hitPoint.x, 0f, hitPoint.z);
+            }
+            
+            inputState.AttackTriggered = _attackTriggered; // [!code ++]
+
+            sceneBlackboardEntity.SetComponentData(inputState);
+            
+            _attackTriggered = false; // [!code ++]
+        }
+```
+</CodeAccordion>
+
+### One shot animation
+
+For the actual animation handling, I'll create two new components:
+```csharp
+    public struct ActionClipComponent : IComponentData
+    {
+        public BlobAssetReference<SkeletonClipSetBlob> ClipSet;
+    }
+
+    public struct ActionClipState : IComponentData
+    {
+        public ClipState ClipState;
+    }
+```
+<Caption>This will need some refactoring. Later...</Caption>
+
+I know I'll need an "Aniamtion Event" to trigger the axe throw. Luckily, Kinemation can handle animation events.
+
+<Picture src={animationEvent} alt="Animation Event"/>
+<Caption>Right here!</Caption>
+
+And here we go again with a new big blobber :
+<CodeAccordion title="ActionAuthoring.cs">
+```csharp
+namespace Survivors.Play.Authoring.Animations
+{
+    public class ActionAuthoring : MonoBehaviour
+    {
+        [SerializeField] AnimationClipProperty actionClipProperty;
+
+        [TemporaryBakingType]
+        struct ActionClipSmartBakeItem : ISmartBakeItem<ActionAuthoring>
+        {
+            SmartBlobberHandle<SkeletonClipSetBlob> m_clipSetHandle;
+
+            public bool Bake(ActionAuthoring authoring,
+                IBaker baker)
+            {
+                if (!authoring.actionClipProperty.clip) return false;
+
+                var entity = baker.GetEntity(TransformUsageFlags.Dynamic);
+                baker.AddComponent<ActionClipComponent>(entity);
+
+                var clips = new NativeArray<SkeletonClipConfig>(1, Allocator.Temp);
+                var clip = authoring.actionClipProperty.clip;
+
+                clips[0] = new SkeletonClipConfig
+                {
+                    clip     = clip,
+                    settings = SkeletonClipCompressionSettings.kDefaultSettings,
+                    events   = clip.ExtractKinemationClipEvents(Allocator.Temp)
+                };
+
+                m_clipSetHandle = baker.RequestCreateBlobAsset(baker.GetComponent<Animator>(), clips);
+
+                return true;
+            }
+
+            public void PostProcessBlobRequests(EntityManager entityManager,
+                Entity entity)
+            {
+                var clipSet = m_clipSetHandle.Resolve(entityManager);
+                entityManager.SetComponentData(entity, new ActionClipComponent
+                {
+                    ClipSet = clipSet
+                });
+            }
+        }
+
+
+        class ActionClipBaker : SmartBaker<ActionAuthoring, ActionClipSmartBakeItem> { }
+
+        class ActionAuthoringBaker : Baker<ActionAuthoring>
+        {
+            public override void Bake(ActionAuthoring authoring)
+            {
+                var entity = GetEntity(TransformUsageFlags.Dynamic);
+                var clipEvents = authoring.actionClipProperty.clip.ExtractKinemationClipEvents(Allocator.Temp);
+                var clipState = new ActionClipState
+                {
+                    ClipState = new ClipState
+                    {
+                        SpeedMultiplier = authoring.actionClipProperty.speedMultiplier,
+                        EventHash = clipEvents.Length > 0
+                            ? clipEvents[0].name.GetHashCode()
+                            : -1,
+                    }
+                };
+
+                AddComponent(entity, clipState);
+            }
+        }
+    }
+}
+```
+</CodeAccordion>
+<Caption>I'm not proud of this...</Caption>
+
+Now, let's try to create a system that will handle the action animation. I'll leave the event handling for later.
+
+<CodeAccordion title="PlayerActionSystem.cs">
+```csharp
+namespace Survivors.Play.Systems.Player
+{
+    public partial struct PlayerActionSystem : ISystem
+    {
+        LatiosWorldUnmanaged m_worldUnmanaged;
+
+        [BurstCompile]
+        public void OnCreate(ref SystemState state)
+        {
+            m_worldUnmanaged = state.GetLatiosWorldUnmanaged();
+            state.RequireForUpdate<PlayerTag>();
+        }
+
+        [BurstCompile]
+        public void OnUpdate(ref SystemState state)
+        {
+            var inpuState = m_worldUnmanaged.sceneBlackboardEntity.GetComponentData<PlayerInputState>();
+
+            state.Dependency = new AnimationJob
+            {
+                DeltaTime  = SystemAPI.Time.DeltaTime,
+                InputState = inpuState
+            }.ScheduleParallel(state.Dependency);
+        }
+
+        [BurstCompile]
+        public void OnDestroy(ref SystemState state) { }
+
+
+        [BurstCompile]
+        partial struct AnimationJob : IJobEntity
+        {
+            [ReadOnly] public float DeltaTime;
+            [ReadOnly] public PlayerInputState InputState;
+
+            void Execute(
+                OptimizedSkeletonAspect skeleton,
+                in ActionClipComponent actionClipComponent,
+                ref ActionClipState actionClipState)
+            {
+                ref var axeThrowClip = ref actionClipComponent.ClipSet.Value.clips[0];
+                ref var axeThrowState = ref actionClipState.ClipState;
+
+
+                if (InputState.AttackTriggered || axeThrowState.PreviousTime < axeThrowState.Time)
+                {
+                    axeThrowState.Update(DeltaTime * axeThrowState.SpeedMultiplier);
+                    axeThrowState.Time = axeThrowClip.LoopToClipTime(axeThrowState.Time);
+                    axeThrowClip.SamplePose(ref skeleton, axeThrowState.Time, 1f);
+                    skeleton.EndSamplingAndSync();
+                }
+            }
+        }
+    }
+}
+```
+</CodeAccordion>
+
+<Video src={frontmatter.baseVideoUrl + "barbarian-action-1.mp4"}/>
+<Caption>Not throwing yet.</Caption>
+
+### Avatar Masks
+
+Wait. Wait, wait, wait. Is he sliding on the ground when attacking? Well, obviously. In a Game Object workflow you'd use an AvatarMask.
+
+Luckily, again, Kinemation can handle it!
+
+```csharp
+public struct AvatarMasks : IComponentData
+{
+    public BlobAssetReference<SkeletonBoneMaskSetBlob> Blob;
+}
+```
+<Caption>Yep. `SkeletonBoneMaskSetBlob`to the rescue!</Caption>
+
+Time for another big blobber!
+<CodeAccordion title="AvatarMasksAuthoring.cs">
+```csharp
+namespace Survivors.Play.Authoring.Animations
+{
+    public class AvatarMasksAuthoring : MonoBehaviour
+    {
+        [SerializeField] List<AvatarMask> avatarMasks;
+
+
+        [TemporaryBakingType]
+        struct AvatarMasksSmartBakeItem : ISmartBakeItem<AvatarMasksAuthoring>
+        {
+            SmartBlobberHandle<SkeletonBoneMaskSetBlob> m_blobberHandle;
+
+            public bool Bake(AvatarMasksAuthoring authoring,
+                IBaker baker)
+            {
+                if (authoring.avatarMasks.Count == 0)
+                    return false;
+
+                var entity = baker.GetEntity(TransformUsageFlags.Dynamic);
+                baker.AddComponent<AvatarMasks>(entity);
+
+                var masks = new NativeArray<UnityObjectRef<AvatarMask>>(authoring.avatarMasks.Count, Allocator.Temp);
+                for (var i = 0; i < authoring.avatarMasks.Count; i++) masks[i] = authoring.avatarMasks[i];
+
+                m_blobberHandle = baker.RequestCreateBlobAsset(baker.GetComponent<Animator>(), masks);
+                masks.Dispose();
+
+                return true;
+            }
+
+            public void PostProcessBlobRequests(EntityManager entityManager,
+                Entity entity)
+            {
+                entityManager.SetComponentData(entity, new AvatarMasks
+                {
+                    Blob = m_blobberHandle.Resolve(entityManager)
+                });
+            }
+        }
+
+        class AvatarMasksBaker : SmartBaker<AvatarMasksAuthoring, AvatarMasksSmartBakeItem> { }
+    }
+}
+```
+</CodeAccordion>
+<Caption>Not so big.</Caption>
+
+And a small modification to the `AnimationJob` to sample the pose with the mask:
+```csharp
+        [BurstCompile]
+        partial struct AnimationJob : IJobEntity
+        {
+            [ReadOnly] public float DeltaTime;
+            [ReadOnly] public PlayerInputState InputState;
+
+            void Execute(
+                OptimizedSkeletonAspect skeleton,
+                in ActionClipComponent actionClipComponent,
+                ref ActionClipState actionClipState,
+                ref AvatarMasks masks) // [!code ++]
+            {
+                ref var axeThrowClip = ref actionClipComponent.ClipSet.Value.clips[0];
+                ref var axeThrowState = ref actionClipState.ClipState;
+                
+                if (InputState.AttackTriggered || axeThrowState.PreviousTime < axeThrowState.Time)
+                {
+                    axeThrowState.Update(DeltaTime * axeThrowState.SpeedMultiplier);
+                    axeThrowState.Time = axeThrowClip.LoopToClipTime(axeThrowState.Time);
+                    axeThrowClip.SamplePose(ref skeleton, axeThrowState.Time, 1f); // [!code --]
+                    axeThrowClip.SamplePose(ref skeleton, masks.Blob.Value.masks[(int)EAction.Throw].AsSpan(), axeThrowState.Time, 1f); // [!code ++]
+                    skeleton.EndSamplingAndSync();
+                }
+            }
+        }
+```
+
+<Video src={frontmatter.baseVideoUrl + "barbarian-action-2.mp4"}/>
+<Caption>Me Hacking! No sliding!</Caption>
+
+### Event
+
+I've already (in an ugly fashion) stored the event hash in the `ActionClipState` component. Here is how I'm handling it at the end of the `AnimationJob`:
+
+```csharp 
+    if (axeThrowClip.events.TryGetEventsRange(axeThrowState.PreviousTime, axeThrowState.Time, out var index, out var eventCount))
+        for (var i = index; i < eventCount; i++)
+        {
+            var eventHash = axeThrowClip.events.nameHashes[i];
+
+            if (eventHash == axeThrowState.EventHash) UnityEngine.Debug.Log("Event Triggered");
+        }
+```
+
+It is working like I want it to. I can now figure out how to spawn the axe at the hand position and throw it in the direction of the mouse.
+
+### Storing a reference to another entity and spawning the axe prefab
+
+To spawn an axe at the hand position, I'll need to store a reference to the character's (non-deforming) bone `handslot.r`.
+I'm adding an `IEnableableComponent` to the `RightHandSlot`. Enabling it will allow me to spawn the axe in a dedicated system.
+
+```csharp
+namespace Survivors.Play.Authoring.Player.Actions
+{
+    public class RightHandSlotAuthoring : MonoBehaviour
+    {
+        [SerializeField] Transform rightHandSlot;
+
+        class RightHandSlotAuthoringBaker : Baker<RightHandSlotAuthoring>
+        {
+            public override void Bake(RightHandSlotAuthoring authoring)
+            {
+                var entity = GetEntity(TransformUsageFlags.Dynamic);
+                AddComponent(entity, new RightHandSlot
+                {
+                    RightHandSlotEntity = GetEntity(authoring.rightHandSlot, TransformUsageFlags.Dynamic)
+                });
+            }
+        }
+    }
+
+    public struct RightHandSlot : IComponentData
+    {
+        public Entity RightHandSlotEntity;
+    }
+
+    public struct RightHandSlotThrowAxeTag : IComponentData, IEnableableComponent { }
+}
+```
+
+Now, to the axe prefab.
+
+Here is how I'm setting up the axe prefab:
+<Picture src={axeSetup} alt="Axe prefab setup"/>
+
+It is "rotated on the side" because I want it to be thrown like a frisbee.
+
+Here is the authoring script. I'm leaving the `ThrownWeaponComponent`to its default values because it will be set inside a system. The `ThrownWeaponConfigComponent` is meant to be read only.
+
+
+<CodeAccordion title="AxeAuthoring.cs">
+```csharp
+namespace Survivors.Play.Authoring.Player.Weapons
+{
+    public class AxeAuthoring : MonoBehaviour
+    {
+        [Header("Axe Config")] [SerializeField]
+        float speed;
+
+        [SerializeField] float rotationSpeed;
+        [SerializeField] float3 rotationAxis;
+
+        class AxeAuthoringBaker : Baker<AxeAuthoring>
+        {
+            public override void Bake(AxeAuthoring authoring)
+            {
+                var entity = GetEntity(TransformUsageFlags.Dynamic);
+                AddComponent<ThrownWeaponComponent>(entity);
+                AddComponent(entity, new WeaponConfigComponent
+                (
+                    authoring.speed,
+                    authoring.rotationSpeed,
+                    authoring.rotationAxis
+                ));
+            }
+        }
+    }
+
+    public struct ThrownWeaponComponent : IComponentData
+    {
+        public float Speed;
+        public float RotationSpeed;
+        public float3 Direction;
+    }
+
+    public struct ThrownWeaponConfigComponent : IComponentData
+    {
+        public readonly float Speed;
+        public readonly float RotationSpeed;
+        public readonly float3 RotationAxis;
+
+        public ThrownWeaponConfigComponent(float speed,
+            float rotationSpeed,
+            float3 rotationAxis)
+        {
+            Speed         = speed;
+            RotationSpeed = rotationSpeed;
+            RotationAxis  = rotationAxis;
+        }
+    }
+}
+```
+</CodeAccordion>
+
+In an excess of confidence I told myself that it would be smart to create a "Weapon Prefab Collection" and have the scene blackboard entity spawn them in a "spawn queue" in a reusable way.
+
+In reality, it looks like premature over engineering 🥲 ...
+
+Anyway, I've created a `BufferElement` that will store a bunch of prefabs (just one, for now...) 
+and an `ICollectionComponent` with a `NativeQueue` that will hold some "spawn data".
+
+```csharp
+    public struct PrefabBufferElement : IBufferElementData
+    {
+        public EntityWith<Prefab> Prefab;
+    }
+
+    public partial struct WeaponSpawnQueue : ICollectionComponent
+    {
+        public struct WeaponSpawnData
+        {
+            public EntityWith<Prefab> WeaponPrefab;
+            public float3 Direction;
+            public float3 Position;
+        }
+
+        public NativeQueue<WeaponSpawnData> WeaponQueue;
+
+        public JobHandle TryDispose(JobHandle inputDeps)
+        {
+            if (!WeaponQueue.IsCreated)
+                return inputDeps;
+
+            return WeaponQueue.Dispose(inputDeps);
+        }
+    }
+
+    // Ordered by damage power :D
+    public enum EWeaponType
+    {
+        ThrowableAxe,
+        BFG9000,
+        Maroilles,
+        Surströmming,
+    }
+```
+
+Here comes the next steps:
+
+1. Filling the missing piece in `PlayerActionSystem`
+
+    ```csharp
+
+        [BurstCompile]
+        partial struct AnimationJob : IJobEntity
+        {
+            [ReadOnly] public float DeltaTime;
+            [ReadOnly] public PlayerInputState InputState;
+            public EntityCommandBuffer.ParallelWriter ECB;      // [!code ++]
+
+            void Execute(
+                Entity entity,                                  // [!code ++]
+                [ChunkIndexInQuery] int chunkIndexInQuery,      // [!code ++]
+                OptimizedSkeletonAspect skeleton,
+                in ActionClipComponent actionClipComponent,
+                ref ActionClipState actionClipState,
+                ref AvatarMasks masks)
+            {
+                ref var weaponThrowClip = ref actionClipComponent.ClipSet.Value.clips[0];
+                ref var weaponThrowState = ref actionClipState.ClipState;
+
+                if (InputState.AttackTriggered || weaponThrowState.PreviousTime < weaponThrowState.Time)
+                {
+                    weaponThrowState.Update(DeltaTime * weaponThrowState.SpeedMultiplier);
+                    weaponThrowState.Time = weaponThrowClip.LoopToClipTime(weaponThrowState.Time);
+                    weaponThrowClip.SamplePose(ref skeleton, masks.Blob.Value.masks[(int)EAction.Throw].AsSpan(), weaponThrowState.Time, 1f);
+                    skeleton.EndSamplingAndSync();
+                }
+
+
+                if (weaponThrowClip.events.TryGetEventsRange(weaponThrowState.PreviousTime, weaponThrowState.Time, out var index, out var eventCount))
+                    for (var i = index; i < eventCount; i++)
+                    {
+                        var eventHash = weaponThrowClip.events.nameHashes[i];
+                        if (eventHash == axeThrowState.EventHash) UnityEngine.Debug.Log("Event Triggered"); // [!code --]
+                        if (eventHash == weaponThrowState.EventHash) ECB.SetComponentEnabled<RightHandSlotThrowTag>(chunkIndexInQuery, entity, true); // [!code ++]
+                    }
+            }
+        }
+    ```
+
+2. Add the axe to the spawn queue
+
+    <CodeAccordion title="WeaponThrowTriggerSystem">
+    ```csharp
+    namespace Survivors.Play.Systems.Player.Weapons.Initialization
+    {
+        [RequireMatchingQueriesForUpdate]
+        public partial struct WeaponThrowTriggerSystem : ISystem
+        {
+            LatiosWorldUnmanaged m_worldUnmanaged;
+            EntityQuery _rightHandQuery;
+
+            [BurstCompile]
+            public void OnCreate(ref SystemState state)
+            {
+                m_worldUnmanaged = state.GetLatiosWorldUnmanaged();
+
+                _rightHandQuery = state.Fluent()
+                    .WithEnabled<RightHandSlotThrowTag>()
+                    .Build();
+            }
+
+            [BurstCompile]
+            public void OnUpdate(ref SystemState state)
+            {
+                if (_rightHandQuery.IsEmpty) return;
+
+
+                var mousePosition = m_worldUnmanaged.sceneBlackboardEntity.GetComponentData<PlayerInputState>().MousePosition;
+                var spawnQueue = m_worldUnmanaged.sceneBlackboardEntity.GetCollectionComponent<WeaponSpawnQueue>().WeaponQueue;
+                var prefab = m_worldUnmanaged.sceneBlackboardEntity.GetBuffer<PrefabBufferElement>()[(int)EWeaponType.ThrowableAxe].Prefab;
+
+                var ecb = m_worldUnmanaged.syncPoint.CreateEntityCommandBuffer();
+
+                foreach (var (transform, slot, entity) in
+                        SystemAPI.Query<RefRO<WorldTransform>, RefRO<RightHandSlot>>()
+                            .WithEntityAccess())
+                {
+                    var rHandSlotTransform = SystemAPI.GetComponent<WorldTransform>(slot.ValueRO.RightHandSlotEntity);
+
+                    var direction2d = math.normalizesafe(mousePosition.xz - rHandSlotTransform.position.xz);
+                    var direction = new float3(direction2d.x, 0f, direction2d.y);
+
+                    spawnQueue.Enqueue(new WeaponSpawnQueue.WeaponSpawnData
+                    {
+                        WeaponPrefab = prefab,
+                        Position     = rHandSlotTransform.position,
+                        Direction    = direction
+                    });
+
+
+                    ecb.SetComponentEnabled<RightHandSlotThrowTag>(entity, false);
+                }
+            }
+        }
+    }
+    ```
+    </CodeAccordion>
+
+3. Make a Weapon Spawn Queue System.
+
+    ```csharp
+    namespace Survivors.Bootstrap.RootSystems
+    {
+        [UpdateInGroup(typeof(LatiosWorldSyncGroup))]
+        public partial class SyncRootSystems : RootSuperSystem
+        {
+            protected override void CreateSystems()
+            {
+                GetOrCreateAndAddUnmanagedSystem<WeaponSpawnQueueSystem>();
+            }
+        }
+    }
+    ```
+    <Caption>`SyncRootSystems.cs`</Caption>
+
+    <CodeAccordion title="WeaponSpawnQueueSystem.cs">
+    ```csharp
+    namespace Survivors.Play.Systems.Player.Weapons.Spawn
+    {
+        public partial struct WeaponSpawnQueueSystem : ISystem
+        {
+            LatiosWorldUnmanaged m_worldUnmanaged;
+
+            [BurstCompile]
+            public void OnCreate(ref SystemState state)
+            {
+                m_worldUnmanaged = state.GetLatiosWorldUnmanaged();
+            }
+
+            [BurstCompile]
+            public void OnUpdate(ref SystemState state)
+            {
+                var spawnQueue = m_worldUnmanaged.sceneBlackboardEntity.GetCollectionComponent<WeaponSpawnQueue>().WeaponQueue;
+                var icb = m_worldUnmanaged.syncPoint
+                    .CreateInstantiateCommandBuffer<ThrownWeaponComponent, WorldTransform>();
+
+                state.Dependency = new WeaponSpawnJob
+                {
+                    SpawnQueue            = spawnQueue,
+                    WeaponComponentLookup = SystemAPI.GetComponentLookup<ThrownWeaponConfigComponent>(true),
+                    SpawnQueueWriter      = icb.AsParallelWriter()
+                }.Schedule(state.Dependency);
+            }
+
+            [BurstCompile]
+            public void OnDestroy(ref SystemState state) { }
+        }
+
+
+        [BurstCompile]
+        internal struct WeaponSpawnJob : IJob
+        {
+            public NativeQueue<WeaponSpawnQueue.WeaponSpawnData> SpawnQueue;
+            [ReadOnly] public ComponentLookup<ThrownWeaponConfigComponent> WeaponComponentLookup;
+            public InstantiateCommandBuffer<ThrownWeaponComponent, WorldTransform>.ParallelWriter SpawnQueueWriter;
+
+            public void Execute()
+            {
+                var sortKey = 0;
+
+                while (!SpawnQueue.IsEmpty())
+                    if (SpawnQueue.TryDequeue(out var weapon))
+                    {
+                        var transform = new WorldTransform
+                        {
+                            worldTransform = TransformQvvs.identity
+                        };
+
+                        transform.worldTransform.position = weapon.Position;
+                        transform.worldTransform.rotation = quaternion.LookRotation(weapon.Direction, math.up());
+
+                        var config = WeaponComponentLookup[weapon.WeaponPrefab];
+
+                        SpawnQueueWriter.Add(
+                            weapon.WeaponPrefab, new ThrownWeaponComponent
+                            {
+                                Direction     = weapon.Direction,
+                                Speed         = config.Speed,
+                                RotationSpeed = config.RotationSpeed,
+                                RotationAxis  = config.RotationAxis
+                            }, transform,
+                            ++sortKey);
+                    }
+            }
+        }
+    }
+    ```
+    </CodeAccordion>
+    <Caption>`WeaponSpawnQueueSystem.cs`</Caption>
+
+
+    ### Moving the Axe !
+
+    Now that the axe is spawned, I need to move it. I'll create a new system that will handle the axe movement.
+
+    I will keep it simple or this article will become a book.
+
+```csharp
+namespace Survivors.Play.Systems.Player.Weapons.Physics
+{
+    public partial struct ThrownWeaponUpdateSystem : ISystem
+    {
+        LatiosWorldUnmanaged m_latiosWorldUnmanaged;
+
+        [BurstCompile]
+        public void OnCreate(ref SystemState state)
+        {
+            m_latiosWorldUnmanaged = state.GetLatiosWorldUnmanaged();
+        }
+
+        [BurstCompile]
+        public void OnUpdate(ref SystemState state)
+        {
+            var dcb = m_latiosWorldUnmanaged.syncPoint.CreateDestroyCommandBuffer();
+            var collisionLayer = m_latiosWorldUnmanaged.sceneBlackboardEntity
+                .GetCollectionComponent<EnvironmentCollisionLayer>().layer;
+            state.Dependency = new ThrownWeaponUpdateJob
+            {
+                DeltaTime            = SystemAPI.Time.DeltaTime,
+                EnvironmentLayer     = collisionLayer,
+                DestroyCommandBuffer = dcb.AsParallelWriter()
+            }.ScheduleParallel(state.Dependency);
+        }
+
+        [BurstCompile]
+        public void OnDestroy(ref SystemState state) { }
+    }
+}
+```
+<Caption>The System</Caption>
+
+```csharp
+[BurstCompile]
+internal partial struct ThrownWeaponUpdateJob : IJobEntity
+{
+    public DestroyCommandBuffer.ParallelWriter DestroyCommandBuffer;
+    [ReadOnly] public CollisionLayer EnvironmentLayer;
+    [ReadOnly] public float DeltaTime;
+
+    public void Execute(
+        Entity entity,
+        [EntityIndexInQuery] int entityIndexInQuery,
+        ref WorldTransform transform,
+        in ThrownWeaponComponent thrownWeapon,
+        in Collider collider
+    )
+    {
+        var transformQvs = transform.worldTransform;
+
+        if (Latios.Psyshock.Physics.ColliderCast(
+                in collider,
+                in transformQvs,
+                transform.position + thrownWeapon.Direction * thrownWeapon.Speed,
+                in EnvironmentLayer,
+                out var result,
+                out _))
+            switch (collider.type)
+            {
+                case ColliderType.Capsule:
+                {
+                    CapsuleCollider capsuleCollider = collider;
+
+                    if (result.distance <= capsuleCollider.radius * 2f)
+                    {
+                        DestroyCommandBuffer.Add(entity, entityIndexInQuery);
+
+                        return;
+                    }
+
+
+                    break;
+                }
+            }
+
+
+        transform.worldTransform.position = transformQvs.position
+                                            + thrownWeapon.Direction * thrownWeapon.Speed * DeltaTime;
+
+
+        transform.worldTransform.rotation = math.mul(transformQvs.rotation, Quat.RotateAroundAxis(
+            thrownWeapon.RotationAxis,
+            thrownWeapon.RotationSpeed * DeltaTime));
+    }
+}
+```	
+<Caption>The Job</Caption>
+
+The `ThrownWeaponUpdateJob` is quite simple, it moves the axed in the direction that was given to the `ThrownWeaponComponent` and destroys the axe if it collides with the environment.
+It also rotates the axe around the `RotationAxis` at a speed defined in the `ThrownWeaponConfigComponent`.
+
+`Quat.RotateAroundAxis` is a simple utility function that rotates the axe around the given axis. It is similar to `quaternion.RotateX`, `quaternion.RotateY` and `quaternion.RotateZ` but it takes a float3 as an axis.
+
+```csharp
+public static class Quat
+{
+    public static quaternion RotateAroundAxis(float3 axis,
+        float angle)
+    {
+        float sina, cosa;
+        math.sincos(0.5f * angle, out sina, out cosa);
+
+        axis = math.normalize(axis);    
+
+        return math.quaternion(
+            axis.x * sina,
+            axis.y * sina,
+            axis.z * sina,
+            cosa);
+    }
+}
+```
+
+### Small issue
+
+With this code, the axe tends to often fo through wall without being destroyed. I've found a solution that (mostly) works but is pretty expensive. I'll find something better later.
+```csharp
+    var transformQvs = transform.worldTransform;
+
+    float3 startPosition = transformQvs.position;                                                   // [!code ++]
+    float3 endPosition = startPosition + thrownWeapon.Direction * thrownWeapon.Speed * DeltaTime;   // [!code ++]
+float stepSize = math.length(endPosition - startPosition) / 4; // 4: why not.                       // [!code ++]
+
+    for (float i = 0; i <= 1; i+= stepSize) // [!code ++]
+    { // [!code ++]
+        float3 currentPosition = math.lerp(startPosition, endPosition, i); // [!code ++]
+        
+        if (Latios.Psyshock.Physics.ColliderCast(
+                in collider,
+                in transformQvs,
+                currentPosition, // [!code ++]
+                in EnvironmentLayer,
+                out var result,
+                out _))
+                // [...]
+```
+
+## Conclusion
+
+That was a big one and it does not even contain any mass simulation stuff you often see in DOTS samples / tutorials... I guess that's the next step: adding a bunch of enemies to mow through!
+
+As usual, you'll find the source here : [Source Part 3](https://github.com/clandais/Latios-Survivors-Articles/tree/Part3)
+
