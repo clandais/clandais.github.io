@@ -1443,26 +1443,69 @@ public static class Quat
 
 ### Small issue
 
-With this code, the axe tends to often fo through wall without being destroyed. I've found a solution that (mostly) works but is pretty expensive. I'll find something better later.
+With this code, the axe tends to often fo through wall without being destroyed.
+The issues are:
+- It is moving quite fast
+- It is rotating and the collider is a CapsuleCollider. Between two collision checks, the CapsuleCollider might have been rotated into an obstacle thus failing the ColliderCast.
+
+So, I'm adding steps to the collision check (an arbitrary 4 steps).
+In each steps, I'm moving the initial transformQvvs position and rotation by a fraction (1/4) of the speed and rotation speed.
+
 ```csharp
     var transformQvs = transform.worldTransform;
+    var stepCount = 4;                                                      //[!code ++]
+    var steppedSpeed = thrownWeapon.Speed / stepCount;                      //[!code ++]
+    var steppedRotation = thrownWeapon.RotationSpeed / stepCount;           //[!code ++]
+    for (float i = 0; i < stepCount; i++)                                   //[!code ++]
+    {                                                                       //[!code ++]
+        if (Latios.Psyshock.Physics.ColliderCast(                           //[!code --]
+        var collision = Latios.Psyshock.Physics.ColliderCast(               //[!code ++]
+            in collider,
+            in transformQvs,
+            transform.position + thrownWeapon.Direction * thrownWeapon.Speed,                   // [!code --]
+            transformQvs.position + thrownWeapon.Direction * thrownWeapon.Speed * DeltaTime,    // [!code ++]
+            in EnvironmentLayer,
+            out _,
+            out _);
 
-    float3 startPosition = transformQvs.position;                                                   // [!code ++]
-    float3 endPosition = startPosition + thrownWeapon.Direction * thrownWeapon.Speed * DeltaTime;   // [!code ++]
-float stepSize = math.length(endPosition - startPosition) / 4; // 4: why not.                       // [!code ++]
+            switch (collider.type)                                              //[!code --]
+            {                                                                   //[!code --]
+                case ColliderType.Capsule:                                      //[!code --]
+                {                                                               //[!code --]
+                    CapsuleCollider capsuleCollider = collider;                 //[!code --]
+                    if (result.distance <= capsuleCollider.radius * 2f)         //[!code --]
+                    {                                                           //[!code --]
+                        DestroyCommandBuffer.Add(entity, entityIndexInQuery);   //[!code --]
+                        return;                                                 //[!code --]
+                    }                                                           //[!code --]
+                                                                                //[!code --]
+                    break;                                                      //[!code --]
+                }                                                               //[!code --]
+            }                                                                   // [!code --]
 
-    for (float i = 0; i <= 1; i+= stepSize) // [!code ++]
-    { // [!code ++]
-        float3 currentPosition = math.lerp(startPosition, endPosition, i); // [!code ++]
-        
-        if (Latios.Psyshock.Physics.ColliderCast(
-                in collider,
-                in transformQvs,
-                currentPosition, // [!code ++]
-                in EnvironmentLayer,
-                out var result,
-                out _))
-                // [...]
+        if (collision)                                                          //[!code ++]
+        {                                                                       //[!code ++]
+            DestroyCommandBuffer.Add(entity, entityIndexInQuery);               //[!code ++]
+                                                                                //[!code ++]
+            return;                                                             //[!code ++]
+        }                                                                       //[!code ++]
+
+
+        transformQvs.position += thrownWeapon.Direction * steppedSpeed * DeltaTime;     //[!code ++]
+        transformQvs.rotation = math.mul(transformQvs.rotation, Quat.RotateAroundAxis(  //[!code ++]
+            thrownWeapon.RotationAxis, steppedRotation * DeltaTime));                   //[!code ++]
+    }
+
+
+    transform.worldTransform.position = transformQvs.position // [!code --]
+                                    + thrownWeapon.Direction * thrownWeapon.Speed * DeltaTime; // [!code --]
+
+
+    transform.worldTransform.rotation = math.mul(transformQvs.rotation, Quat.RotateAroundAxis( // [!code --]
+        thrownWeapon.RotationAxis, // [!code --]
+        thrownWeapon.RotationSpeed * DeltaTime)) // [!code --]
+
+    transform.worldTransform = transformQvs;                // [!code ++]
 ```
 
 ## Conclusion
