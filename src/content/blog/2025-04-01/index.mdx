@@ -1,0 +1,1157 @@
+---
+title: "Making a Survivors-like with Latios Framework Part 4"
+date: "Apr 1 2025"
+description: "Where I document my DOTS and Latios Framework learning journey."
+draft: false
+baseVideoUrl: "../../vids/blog/latios-survivors-p4/"
+---
+
+import CodeAccordion from "@components/CodeAccordion.astro";
+import Link from "@components/Link.astro";
+import Caption from "@components/Caption.astro";
+import Video from "@components/Video.astro";
+import { Picture } from 'astro:assets';
+
+import skeletonMinion from "./img/skeleton-minion.png";
+import skeletonSetup from "./img/skeleton-setup.png";
+import levelGrid from "./img/level-grid.png";
+
+Goals:
+- Make a prefab for an animated enemy.
+- Make them animated with the same system as the player.
+- Make them follow the player.
+- Make them find their way to the player.
+- Kill'em all!
+
+## Enemies step 1 : Skeleton Minion
+
+I have create a skeleton minion prefab with assets from KayKit.
+
+I had to slightly modify the base character shader graph to handle "emission" as the skeleton is supposed to have glowing eyes.
+
+<Picture src={skeletonMinion} alt="Skeleton Minion" />
+
+### ECS Magic!
+
+Here comes the ECS magic!
+
+The skeleton minion prefab is very similar to the player authoring GameObject.
+The only script I created for it to be animated is `SkeletonMinionAuthoring.cs`.
+
+```csharp
+namespace Survivors.Play.Authoring.Enemies
+{
+    public class SkeletonMinionAuthoring : MonoBehaviour
+    {
+        [SerializeField] MovementSettingsData movementSettings;
+
+        class SkeletonMinionAuthoringBaker : Baker<SkeletonMinionAuthoring>
+        {
+            public override void Bake(SkeletonMinionAuthoring authoring)
+            {
+                var entity = GetEntity(TransformUsageFlags.Dynamic);
+                AddComponent<EnemyTag>(entity);
+                AddComponent(entity, authoring.movementSettings.movementSettings);
+                AddComponent<PreviousVelocity>(entity);
+            }
+        }
+    }
+}
+```
+
+For the other authoring components, here is my setup:
+<Picture src={skeletonSetup} alt="Skeleton Minion Setup" />
+
+And... Done! The `FourDirectionAnimationSystem` already handles the animation entities matching this query:
+```csharp
+    state.Fluent()
+        .WithAspect<OptimizedSkeletonAspect>()
+        .With<Clips>()
+        .With<FourDirectionClipStates>()
+        .With<RigidBody>()
+        .With<PreviousVelocity>()
+        .With<InertialBlendState>()
+        .Without<DeadTag>()
+        .Build();
+```
+
+<Video src={frontmatter.baseVideoUrl + "skeleton-idle.mp4"} />
+<Caption>It's alive!</Caption>
+
+### Simple test behaviour
+
+Let's try to add a bunch of skeleton minions to the scene and a system to follow the player.
+
+<CodeAccordion title="FollowPlayerSystem.cs">
+```csharp
+namespace Survivors.Play.Systems.Enemies
+{
+    public partial struct FollowPlayerSystem : ISystem
+    {
+        LatiosWorldUnmanaged m_world;
+        EntityQuery          m_query;
+
+        [BurstCompile]
+        public void OnCreate(ref SystemState state)
+        {
+            m_world = state.GetLatiosWorldUnmanaged();
+            m_query = state.Fluent()
+                .WithAspect<TransformAspect>()
+                .With<RigidBody>()
+                .With<MovementSettings>()
+                .With<PreviousVelocity>()
+                .With<EnemyTag>()
+                .Without<DeadTag>()
+                .Build();
+
+            state.RequireForUpdate<PlayerPosition>();
+        }
+
+        [BurstCompile]
+        public void OnUpdate(ref SystemState state)
+        {
+            var playerPosition = m_world.sceneBlackboardEntity.GetComponentData<PlayerPosition>();
+
+            state.Dependency = new FollowPlayerJob
+            {
+                TargetPosition = playerPosition,
+                DeltaTime      = SystemAPI.Time.DeltaTime
+            }.ScheduleParallel(m_query, state.Dependency);
+        }
+
+
+        [BurstCompile]
+        partial struct FollowPlayerJob : IJobEntity
+        {
+            [ReadOnly] public PlayerPosition TargetPosition;
+            [ReadOnly] public float          DeltaTime;
+
+            void Execute(TransformAspect transformAspect,
+                in MovementSettings movementSettings,
+                ref RigidBody rigidBody,
+                ref PreviousVelocity previousVelocity)
+            {
+                var currentVelocity = rigidBody.velocity.linear;
+                var desiredVelocity = math.normalize(TargetPosition.Position - transformAspect.worldPosition) * movementSettings.moveSpeed;
+
+                desiredVelocity.y      = currentVelocity.y;
+                previousVelocity.Value = currentVelocity;
+
+                currentVelocity           = currentVelocity.MoveTowards(desiredVelocity, movementSettings.speedChangeRate);
+                rigidBody.velocity.linear = currentVelocity;
+
+
+                var lookDirection = math.length(currentVelocity) > math.EPSILON ? math.normalize(currentVelocity) : math.normalize(desiredVelocity);
+                var lookRotation = quaternion.LookRotationSafe(lookDirection, math.up());
+                transformAspect.worldRotation = transformAspect.worldRotation.RotateTowards(lookRotation, movementSettings.maxAngleDelta * DeltaTime);
+            }
+        }
+    }
+}
+```
+</CodeAccordion>
+
+<Video src={frontmatter.baseVideoUrl + "skeletons-congestions.mp4"} alt="Skeleton Congestions" />
+<Caption>Black Friday</Caption>
+
+## Enemies step 2 : Pathfinding
+
+It took some trials and errors to get the pathfinding "good enough".
+
+The most obvious choice, for this kind of game, was to implement some kind of grid-based flow field.
+
+I had implemented a quick and dirty one at first. Then asked on the Latios Discord if there was a better choice than flow fields and the answer was "flow fields".
+
+### Building a grid
+
+It started with two systems and a `FloorGrid` collection component:
+- `FloorGrid` has a bunch of utility methods to convert coordinates, stores grid infos and 3 native arrays : "Walkable", "IntegrationField" and "VectorField".
+- `FlowGridSystem` to build the grid and store the walkable "tiles". Should run only once since there is no plan to change the level at runtime.
+- `FlowFieldSystem` to build the integration field and the vector field.
+
+<CodeAccordion title="FloorGrid">
+```csharp
+
+    /// <summary>
+    ///  Settings for the flow field system.
+    /// </summary>
+    public struct FlowFieldSettings : IComponentData
+    {
+        public int CellSize;
+    }
+
+    /// <summary>
+    ///  Represents a grid of cells for pathfinding.
+    /// </summary>
+    public partial struct FloorGrid : ICollectionComponent
+    {
+        public NativeArray<bool>   Walkable;
+        public NativeArray<int>    IntegrationField;
+        public NativeArray<float2> VectorField;
+
+        public int Width;
+        public int Height;
+
+        public int CellSize;
+        public int CellCount => Width * Height;
+
+        public int MinX;
+        public int MinY;
+        public int MaxX;
+        public int MaxY;
+
+        public const int UnreachableIntegrationCost = int.MaxValue;
+
+        public static readonly int2[] AllDirections =
+        {
+            new(-1, 0), new(1, 0), new(0, -1), new(0, 1), // Cardinal
+            new(-1, -1), new(1, -1), new(-1, 1), new(1, 1) // Diagonal
+        };
+
+        #region Coordinate Conversion
+
+        public int2 WorldToCell(float2 worldPos) => new int2((int)(worldPos.x - MinX) / CellSize, (int)(worldPos.y - MinY) / CellSize);
+
+        public float2 CellToWorld(int2 cellPos) => new float2(cellPos.x * CellSize + MinX, cellPos.y * CellSize + MinY);
+
+        public int2 IndexToCell(int index) => new int2(index % Width, index / Width);
+
+        public int IndexFromCell(int2 cellPos) => cellPos.y * Width + cellPos.x;
+
+        public float2 IndexToWorld(int index) => CellToWorld(IndexToCell(index));
+        public int IndexFromWorld(float2 worldPos) => IndexFromCell(WorldToCell(worldPos));
+        public int CellToIndex(int2 cellPos) => cellPos.x + cellPos.y * Width;
+
+        #endregion
+
+        #region Debugging
+
+        /// <summary>
+        ///     Draw the grid in the editor
+        /// </summary>
+        /// <param name="grid">
+        ///     The grid to draw
+        /// </param>
+        public static void Draw(FloorGrid grid)
+        {
+            if (!grid.Walkable.IsCreated || !grid.VectorField.IsCreated || !grid.IntegrationField.IsCreated)
+                return; // Grid not ready
+
+            for (var i = 0; i < grid.CellCount; i++)
+            {
+                var cellWorldPos = grid.IndexToWorld(i);
+                var cellCenter = new float3(cellWorldPos.x + grid.CellSize / 2f, 0.1f, cellWorldPos.y + grid.CellSize / 2f);
+
+                // Draw Cell Borders (Walkable = Green, Non-Walkable = Red)
+                var borderColor = grid.Walkable[i] ? Color.green : Color.red;
+                var halfSize = grid.CellSize / 2f;
+                Debug.DrawLine(cellCenter + new float3(-halfSize, 0, -halfSize), cellCenter + new float3(-halfSize, 0, halfSize), borderColor);
+                Debug.DrawLine(cellCenter + new float3(halfSize, 0, -halfSize), cellCenter + new float3(halfSize, 0, halfSize), borderColor);
+                Debug.DrawLine(cellCenter + new float3(-halfSize, 0, -halfSize), cellCenter + new float3(halfSize, 0, -halfSize), borderColor);
+                Debug.DrawLine(cellCenter + new float3(-halfSize, 0, halfSize), cellCenter + new float3(halfSize, 0, halfSize), borderColor);
+
+                // Draw Vector Field (Blue Arrows)
+                if (grid.Walkable[i] && grid.IntegrationField[i] != UnreachableIntegrationCost) // Only draw vectors for reachable cells
+                {
+                    var vector = grid.VectorField[i];
+                    // Scale vector for visibility, but not excessively
+                    var vectorScale = math.min(grid.CellSize * 0.4f, 1.0f);
+                    Debug.DrawLine(
+                        cellCenter,
+                        cellCenter + new float3(vector.x, 0, vector.y) * vectorScale,
+                        Color.blue);
+                }
+            }
+        }
+
+        #endregion
+
+        /// <summary>
+        ///     Interface implementation for collection component.
+        /// </summary>
+        /// <param name="inputDeps">
+        ///     The job handle to combine with the dispose job.
+        /// </param>
+        /// <returns>
+        ///     The combined job handle.
+        /// </returns>
+        public JobHandle TryDispose(JobHandle inputDeps)
+        {
+            var combinedDeps = inputDeps;
+            if (Walkable.IsCreated)
+                combinedDeps = JobHandle.CombineDependencies(combinedDeps, Walkable.Dispose(combinedDeps));
+            if (IntegrationField.IsCreated)
+                combinedDeps = JobHandle.CombineDependencies(combinedDeps, IntegrationField.Dispose(combinedDeps));
+            if (VectorField.IsCreated)
+                combinedDeps = JobHandle.CombineDependencies(combinedDeps, VectorField.Dispose(combinedDeps));
+
+            return combinedDeps;
+        }
+    }
+```
+</CodeAccordion>
+
+With this setup, I'm able to build a grid of cells based on Anna's `EnvironmentCollisionLayer`, raycasting the the layer in a grid-like pattern.
+
+My first issue was that, in the first `OnUpdate` of the `FlowGridSystem`, the raycasts were not hitting anything.
+Adding `state.RequireForUpdate<EnvironmentCollisionTag>()` didn't help.
+Not sure why but, given the feedbacks I got, I think it was a timing issue.
+The level's sub-scene was probably not loaded yet so the `EnvironmentCollisionLayer`was *empty*.
+The quick fix was to add an authoring component on the level's sub-scene root game object that adds a `LevelTag` component and require it in the `FlowGridSystem`.
+
+The second issue was that raycasting towards each cells' center was not precise enough.
+Some cells where partially walkable due to walls hitting walls.
+Increasing the grid resolution solved the issue but was taking a toll on performance.
+Casting a collider, even a bit smaller than a cell, was not much better (except when increasing the resolution).
+
+I ended up with an intermediate solution: raycasting towards the top left and the bottom right corners of the cell.
+It gave decent results for a cell size of 2 units.
+Even at 4 units, it was still decent which might be useful if the level starts to get bigger.
+
+<CodeAccordion title="FlowGridSystem.cs">
+```csharp
+namespace Survivors.Play.Systems.Pathfinding
+{
+    public partial struct FlowGridSystem : ISystem, ISystemNewScene
+    {
+        LatiosWorldUnmanaged m_worldUnmanaged;
+
+        [BurstCompile]
+        public void OnCreate(ref SystemState state)
+        {
+            m_worldUnmanaged = state.GetLatiosWorldUnmanaged();
+            state.RequireForUpdate<LevelTagAuthoring.LevelTag>();
+        }
+
+        [BurstCompile]
+        public void OnUpdate(ref SystemState state)
+        {
+            var collisionLayerComponent = m_worldUnmanaged.sceneBlackboardEntity.GetCollectionComponent<EnvironmentCollisionLayer>();
+
+            if (m_worldUnmanaged.sceneBlackboardEntity.HasComponent<FloorGridConstructedTag>())
+            {
+                state.Enabled = false;
+
+                return;
+            }
+
+
+            var settings = m_worldUnmanaged.GetPhysicsSettings();
+
+            var flowFieldSettings = m_worldUnmanaged.sceneBlackboardEntity.GetComponentData<FlowFieldSettings>();
+            var grid = new FloorGrid
+            {
+                CellSize = math.max(1, flowFieldSettings.CellSize)
+            };
+
+            var worldAabb = settings.collisionLayerSettings.worldAabb;
+
+            grid.MinX = (int)math.floor(worldAabb.min.x);
+            grid.MinY = (int)math.floor(worldAabb.min.z);
+            grid.MaxX = (int)math.ceil(worldAabb.max.x);
+            grid.MaxY = (int)math.ceil(worldAabb.max.z);
+
+            grid.Width  = math.max(1, (grid.MaxX - grid.MinX) / grid.CellSize);
+            grid.Height = math.max(1, (grid.MaxY - grid.MinY) / grid.CellSize);
+
+
+            if (grid.CellCount <= 0)
+            {
+                UnityEngine.Debug.LogError($"Invalid grid dimensions: W={grid.Width}, H={grid.Height}. Aborting grid creation.");
+                return;
+            }
+
+
+            grid.Walkable         = new NativeArray<bool>(grid.CellCount, Allocator.Persistent);
+            grid.IntegrationField = new NativeArray<int>(grid.CellCount, Allocator.Persistent);
+            grid.VectorField      = new NativeArray<float2>(grid.CellCount, Allocator.Persistent);
+
+            state.Dependency = new CheckWalkabilityJob
+            {
+                Grid           = grid,
+                CollisionLayer = collisionLayerComponent.layer
+            }.ScheduleParallel(grid.CellCount, 128, state.Dependency);
+
+            m_worldUnmanaged.sceneBlackboardEntity.SetCollectionComponentAndDisposeOld(grid);
+            m_worldUnmanaged.sceneBlackboardEntity.AddComponent<FloorGridConstructedTag>();
+
+            UnityEngine.Debug.Log(
+                $"Floor Grid Constructed: {grid.Width}x{grid.Height}, CellSize: {grid.CellSize}, Bounds: ({grid.MinX},{grid.MinY})->({grid.MaxX},{grid.MaxY})");
+        }
+
+        public void OnNewScene(ref SystemState state)
+        {
+            // Dispose previous grid if it exists
+            if (m_worldUnmanaged.sceneBlackboardEntity.HasCollectionComponent<FloorGrid>())
+            {
+                var oldGrid = m_worldUnmanaged.sceneBlackboardEntity.GetCollectionComponent<FloorGrid>();
+                state.Dependency = oldGrid.TryDispose(state.Dependency);
+            }
+
+
+            m_worldUnmanaged.sceneBlackboardEntity.AddOrSetCollectionComponentAndDisposeOld<FloorGrid>(default);
+            m_worldUnmanaged.sceneBlackboardEntity.RemoveComponent<FloorGridConstructedTag>();
+            state.Enabled = true; // Re-enable the system for the new scene
+        }
+    }
+}
+```
+</CodeAccordion>
+<Caption>FlowGridSystem</Caption>
+<CodeAccordion title="FlowGridSystem.CheckWalkabilityJob">
+```csharp
+[BurstCompile]
+struct CheckWalkabilityJob : IJobFor
+{
+    [ReadOnly] public CollisionLayer CollisionLayer;
+
+    public FloorGrid Grid;
+
+    const float RaycastVerticalOffset = 10f;
+    const float RaycastDistance       = 20f;
+
+    public void Execute(int index)
+    {
+        Grid.Walkable[index]         = false;
+        Grid.IntegrationField[index] = FloorGrid.UnreachableIntegrationCost;
+        Grid.VectorField[index]      = float2.zero;
+
+
+        var cellCoords = Grid.IndexToCell(index);
+        var worldPos = Grid.CellToWorld(cellCoords);
+
+        var cellLeft = new float3(worldPos.x, 0, worldPos.y);
+        var cellRight = new float3(worldPos.x + Grid.CellSize, 0, worldPos.y + Grid.CellSize);
+
+
+        var rayStartLeft = cellLeft + new float3(0, RaycastVerticalOffset, 0);
+        var rayStartRight = cellRight + new float3(0, RaycastVerticalOffset, 0);
+
+        var rayDir = math.down();
+
+        //  Cast at two points to check for "walkability"
+        if (Latios.Psyshock.Physics.Raycast(rayStartLeft, rayStartLeft + rayDir * RaycastDistance, in CollisionLayer, out _, out _)
+            && Latios.Psyshock.Physics.Raycast(rayStartRight, rayStartRight + rayDir * RaycastDistance, in CollisionLayer, out _, out _))
+            Grid.Walkable[index] = true;
+    }
+}
+```
+</CodeAccordion>
+<Caption>CheckWalkabilityJob</Caption>
+
+<Picture src={levelGrid} alt="Level Grid" />
+<Caption>Good enough at GridSize = 4</Caption>
+
+### Pathfinding
+
+Like I said earlier, my first approach was pretty "brute force", it was just a simple breadth-first search algorithm.
+
+I wanted to try something more *conventional* for a flow field.
+
+I looked around and stumbled (again) on Amit Patel's blog, leifnode's  blog and "howtorts".
+My implementation was missing the "integration field" part and an implementation of a `NativePriorityQueue` great.
+
+
+*Aside:*
+> I'm an not a data structure and algorithm wizard. I came to programming from an (failed) artist background. 
+>
+> I "formally" studied programming at 29 in a "training establishment" geared towards adults looking for a career change.
+> 
+> So, even though I do have a "valid" CS degree, I was mostly trained to be an efficient "corporate code monkey": MVC, OOP, SOLID, design patterns, (FR)AGILE, managed programming languages, performances as a *nice to have*, etc.
+>
+> All this to say : I never implemented a linked list in C... Sadly?.
+
+![A Coding Monkey](https://c.tenor.com/Ut1EdX0r6soAAAAd/tenor.gif)
+
+I asked Google's AI (Gemini 2.5 pro) without expecting much, I had yet to see something useful from AI chats, something more complex than *FizzBuzz*.
+
+Once the first confusion passed (Gemini suggesting that I use `NativePriorityQueue` from `Unity.Collections.Unsafe`... which doesn't exist), it managed to generate a working implementation of a `NativeMinHeap<TElement, TComparer>`.
+
+<CodeAccordion title="NativeMinHeap.cs">
+```csharp
+namespace Survivors.Utilities
+{
+    /// <summary>
+    ///     Gemini 2.5 pro - generated :-/
+    /// </summary>
+    /// <typeparam name="TElement"></typeparam>
+    /// <typeparam name="TComparer"></typeparam>
+    public struct NativeMinHeap<TElement, TComparer> : IDisposable
+        where TElement : unmanaged // Element type must be unmanaged
+        where TComparer : struct, IComparer<TElement>
+    {
+        NativeList<TElement> m_Data;
+        TComparer            m_Comparer; // Store the comparer instance
+
+        public bool IsCreated => m_Data.IsCreated;
+        public int Count => m_Data.Length;
+        public bool IsEmpty => m_Data.Length == 0;
+
+        public NativeMinHeap(int initialCapacity,
+            Allocator allocator,
+            TComparer comparer = default)
+        {
+            m_Data     = new NativeList<TElement>(initialCapacity, allocator);
+            m_Comparer = comparer; // Initialize the comparer
+        }
+
+        // Add an element and maintain heap property
+        public void Enqueue(TElement element)
+        {
+            m_Data.Add(element);
+            SiftUp(m_Data.Length - 1);
+        }
+
+        // Remove and return the smallest element
+        public TElement Dequeue()
+        {
+            if (m_Data.Length == 0) throw new InvalidOperationException("Heap is empty");
+
+            var minElement = m_Data[0];
+            var lastIndex = m_Data.Length - 1;
+
+            // Move the last element to the root
+            m_Data[0] = m_Data[lastIndex];
+            m_Data.RemoveAt(lastIndex); // Remove the last element
+
+            // Restore heap property from the root
+            if (m_Data.Length > 0) SiftDown(0);
+
+            return minElement;
+        }
+
+        public bool TryDequeue(out TElement element)
+        {
+            if (IsEmpty)
+            {
+                element = default;
+
+                return false;
+            }
+
+
+            element = Dequeue();
+
+            return true;
+        }
+
+        public TElement Peek()
+        {
+            if (m_Data.Length == 0) throw new InvalidOperationException("Heap is empty");
+
+            return m_Data[0];
+        }
+
+
+        public bool TryPeek(out TElement element)
+        {
+            if (IsEmpty)
+            {
+                element = default;
+
+                return false;
+            }
+
+
+            element = m_Data[0];
+
+            return true;
+        }
+
+        public void Clear()
+        {
+            m_Data.Clear();
+        }
+
+        // Move element up the heap
+        void SiftUp(int index)
+        {
+            if (index <= 0) return;
+
+            var parentIndex = (index - 1) / 2;
+
+            // Use the comparer: if element at index is smaller than its parent
+            if (m_Comparer.Compare(m_Data[index], m_Data[parentIndex]) < 0)
+            {
+                // Swap
+                (m_Data[index], m_Data[parentIndex]) = (m_Data[parentIndex], m_Data[index]);
+
+                // Continue sifting up from the parent index
+                SiftUp(parentIndex);
+            }
+        }
+
+        // Move element down the heap
+        void SiftDown(int index)
+        {
+            var leftChildIndex = 2 * index + 1;
+            var rightChildIndex = 2 * index + 2;
+            var smallestIndex = index; // Assume current node is smallest
+
+            // Compare with left child (using comparer)
+            if (leftChildIndex < m_Data.Length && m_Comparer.Compare(m_Data[leftChildIndex], m_Data[smallestIndex]) < 0) smallestIndex = leftChildIndex;
+
+            // Compare with right child (using comparer)
+            if (rightChildIndex < m_Data.Length && m_Comparer.Compare(m_Data[rightChildIndex], m_Data[smallestIndex]) < 0) smallestIndex = rightChildIndex;
+
+            // If the smallest is not the current node, swap and continue sifting down
+            if (smallestIndex != index)
+            {
+                (m_Data[index], m_Data[smallestIndex]) = (m_Data[smallestIndex], m_Data[index]);
+
+                SiftDown(smallestIndex);
+            }
+        }
+
+        public void Dispose()
+        {
+            if (m_Data.IsCreated) m_Data.Dispose();
+        }
+
+        // Optional: Dispose with JobHandle
+        public JobHandle Dispose(JobHandle inputDeps)
+        {
+            if (m_Data.IsCreated) return m_Data.Dispose(inputDeps);
+
+            return inputDeps;
+        }
+    }
+}
+```
+</CodeAccordion>
+
+Now, I had to implement the integration field and vector field.
+
+I'll split the implementation in two parts:
+- The System 
+- The integration field job
+- The vector field job
+
+<CodeAccordion title="FlowFieldSystem.cs">
+```csharp
+namespace Survivors.Play.Systems.Pathfinding
+{
+    [RequireMatchingQueriesForUpdate]
+    public partial struct FlowFieldSystem : ISystem
+    {
+        LatiosWorldUnmanaged m_worldUnmanaged;
+        EntityQuery          m_query;
+
+        [BurstCompile]
+        public void OnCreate(ref SystemState state)
+        {
+            m_worldUnmanaged = state.GetLatiosWorldUnmanaged();
+            m_query          = state.Fluent().With<LevelTagAuthoring.LevelTag>().Build();
+            
+        }
+
+        [BurstCompile]
+        public void OnUpdate(ref SystemState state)
+        {
+            
+            var grid = m_worldUnmanaged.sceneBlackboardEntity.GetCollectionComponent<FloorGrid>();
+            
+
+            var playerPos = m_worldUnmanaged.sceneBlackboardEntity.GetComponentData<PlayerPosition>();
+            var targetCell = grid.WorldToCell(playerPos.Position.xz);
+
+            // Clamp target cell to be within grid bounds
+            targetCell.x = math.clamp(targetCell.x, 0, grid.Width - 1);
+            targetCell.y = math.clamp(targetCell.y, 0, grid.Height - 1);
+            var targetIndex = grid.IndexFromCell(targetCell);
+            
+
+            var integrationJob = new BuildIntegrationFieldJob
+            {
+                TargetIndex = targetIndex,
+                Grid        = grid
+            };
+
+            state.Dependency = integrationJob.Schedule(state.Dependency);
+
+            var vectorFieldJob = new CalculateVectorFieldJob
+            {
+                Grid = grid
+            };
+
+            state.Dependency = vectorFieldJob.ScheduleParallel(grid.CellCount, 128, state.Dependency);
+
+        }
+    }
+}
+```
+</CodeAccordion>
+
+<Caption>FlowFieldSystem</Caption>
+
+<CodeAccordion title="FlowFieldSystem.BuildIntegrationFieldJob">
+```csharp
+[BurstCompile]
+struct BuildIntegrationFieldJob : IJob
+{
+    [ReadOnly] public int       TargetIndex;
+    public            FloorGrid Grid;
+
+    // Cost for moving horizontally or vertically
+    const int CardinalCost = 10;
+
+    // Cost for moving diagonally (approx. 10 * sqrt(2))
+    const int DiagonalCost = 14;
+
+    [BurstCompile]
+    struct QueueElement 
+    {
+        public int Index;
+        public int Cost;
+    }
+
+    [BurstCompile]
+    struct CostComparer : IComparer<QueueElement>
+    {
+        public int Compare(QueueElement x,
+            QueueElement y)
+        {
+            return x.Cost.CompareTo(y.Cost);
+        }
+    }
+
+    public void Execute()
+    {
+        for (var i = 0; i < Grid.CellCount; ++i) Grid.IntegrationField[i] = FloorGrid.UnreachableIntegrationCost;
+
+
+        if (TargetIndex < 0 || TargetIndex >= Grid.CellCount || !Grid.Walkable[TargetIndex])
+        {
+            UnityEngine.Debug.LogWarning($"IntegrationFieldJob: Invalid target index {TargetIndex}");
+            return;
+        }
+
+
+        
+        var priorityQueue = new NativeMinHeap<QueueElement, CostComparer>(
+            Grid.Width,
+            Allocator.Temp
+        );
+
+        Grid.IntegrationField[TargetIndex] = 0;
+        priorityQueue.Enqueue(new QueueElement { Index = TargetIndex, Cost = 0 });
+
+        while (priorityQueue.TryDequeue(out var currentElement))
+        {
+            var currentIdx = currentElement.Index;
+            var currentCost = currentElement.Cost;
+
+            if (currentCost > Grid.IntegrationField[currentIdx]) continue;
+
+            var currentCell = Grid.IndexToCell(currentIdx);
+
+            foreach (var direction in FloorGrid.AllDirections)
+            {
+                var neighborCell = currentCell + direction;
+
+                if (neighborCell.x < 0 || neighborCell.x >= Grid.Width || neighborCell.y < 0 || neighborCell.y >= Grid.Height) continue;
+
+                var neighborIndex = Grid.IndexFromCell(neighborCell);
+
+                if (!Grid.Walkable[neighborIndex]) continue;
+
+                var stepCost = math.abs(direction.x) + math.abs(direction.y) == 1 ? CardinalCost : DiagonalCost;
+                var newCost = currentCost + stepCost;
+
+                if (newCost < Grid.IntegrationField[neighborIndex])
+                {
+                    Grid.IntegrationField[neighborIndex] = newCost;
+                    priorityQueue.Enqueue(new QueueElement { Index = neighborIndex, Cost = newCost });
+                }
+            }
+        }
+
+
+        priorityQueue.Dispose();
+    }
+}
+```
+</CodeAccordion>
+
+<Caption>BuildIntegrationFieldJob</Caption>
+
+<CodeAccordion title="FlowFieldSystem.CalculateVectorFieldJob">
+```csharp
+[BurstCompile]
+struct CalculateVectorFieldJob : IJobFor
+{
+    [NativeDisableParallelForRestriction] // Needed because we write to VectorField
+    public FloorGrid Grid;
+
+    public void Execute(int index)
+    {
+        if (!Grid.Walkable[index] || Grid.IntegrationField[index] == FloorGrid.UnreachableIntegrationCost)
+        {
+            Grid.VectorField[index] = float2.zero;
+            return;
+        }
+
+        var currentCell = Grid.IndexToCell(index);
+        var currentCost = Grid.IntegrationField[index];
+
+        var bestCost = currentCost;
+        var bestDir = int2.zero;
+        
+        foreach (var direction in FloorGrid.AllDirections)
+        {
+            var neighborCell = currentCell + direction;
+
+            // Bounds Check
+            if (neighborCell.x < 0 || neighborCell.x >= Grid.Width || neighborCell.y < 0 || neighborCell.y >= Grid.Height)
+                continue;
+
+            var neighborIndex = Grid.IndexFromCell(neighborCell);
+
+            // Check if neighbor is reachable and has lower cost
+            if (Grid.IntegrationField[neighborIndex] < bestCost)
+            {
+                bestCost = Grid.IntegrationField[neighborIndex];
+                bestDir  = direction;
+            }
+        }
+
+
+        // If the best direction is zero (no lower cost neighbor found, should only happen at target or isolated minima)
+        // or if we are at the target itself (cost 0)
+        if (math.all(bestDir == int2.zero) || currentCost == 0)
+            Grid.VectorField[index] = float2.zero;
+        else
+            Grid.VectorField[index] = math.normalize(bestDir);
+    }
+}
+```
+</CodeAccordion>
+<Caption>CalculateVectorFieldJob</Caption>
+
+The last step is to update the `FollowPlayerSystem` to use the vector field.
+
+<CodeAccordion title="FollowPlayerJob (update)">
+```csharp
+[BurstCompile]
+partial struct FollowPlayerJob : IJobEntity
+{
+    [ReadOnly] public CollisionLayer EnvironmentLayer;  // [!code ++]
+    [ReadOnly] public FloorGrid      Grid;              // [!code ++]
+    [ReadOnly] public float          DeltaTime;
+    [ReadOnly] public PlayerPosition PlayerPosition;
+
+    void Execute(TransformAspect transformAspect,
+        in MovementSettings movementSettings,
+        ref RigidBody rigidBody,
+        ref PreviousVelocity previousVelocity)
+    {
+        var cellPos = Grid.WorldToCell(transformAspect.worldPosition.xz);   // [!code ++]
+        var cellIdx = Grid.CellToIndex(cellPos);                            // [!code ++]
+        // [!code ++]
+        float3 targetDelta = float3.zero;                                   // [!code ++]
+        float2 vecDelta = float2.zero;                                      // [!code ++]   
+        // [!code ++]
+        if (cellIdx >= 0 & cellIdx < Grid.CellCount)                        // [!code ++]
+        {                                                                   // [!code ++]
+            vecDelta = Grid.VectorField[cellIdx];                           // [!code ++]
+        }                                                                   // [!code ++]
+        // [!code ++]
+        var deltaToPlayer = math.normalizesafe(PlayerPosition.Position - transformAspect.worldPosition); // [!code ++]
+        // [!code ++]
+        float3 rayStart = transformAspect.worldPosition; // [!code ++]
+        float3 rayEnd   = transformAspect.worldPosition + deltaToPlayer * 25f; // [!code ++]
+        // [!code ++]
+        // Check if the raycast hits the environment // [!code ++]
+        // If it does, we just follow the vector field // [!code ++]
+        if (!Latios.Psyshock.Physics.Raycast(rayStart, rayEnd, in EnvironmentLayer, out _, out _)) // [!code ++]
+        { // [!code ++]
+            vecDelta += deltaToPlayer.xz; // [!code ++]
+        } // [!code ++]
+        // [!code ++]
+        vecDelta = math.normalizesafe(vecDelta); // [!code ++]
+        // [!code ++]
+        targetDelta.xz = vecDelta; // [!code ++]
+        targetDelta.y  = transformAspect.worldPosition.y; // [!code ++]
+
+
+        var currentVelocity = rigidBody.velocity.linear;
+        var desiredVelocity = math.normalize(TargetPosition.Position - transformAspect.worldPosition) * movementSettings.moveSpeed; // [!code --]
+        var desiredVelocity = math.normalize(targetDelta) * movementSettings.moveSpeed; // [!code ++]
+
+        desiredVelocity.y      = currentVelocity.y;
+        previousVelocity.Value = currentVelocity;
+
+        currentVelocity           = currentVelocity.MoveTowards(desiredVelocity, movementSettings.speedChangeRate);
+        rigidBody.velocity.linear = currentVelocity;
+
+
+        var lookDirection = math.length(currentVelocity) > math.EPSILON ? math.normalize(currentVelocity) : math.normalize(desiredVelocity);
+        var lookRotation = quaternion.LookRotationSafe(lookDirection, math.up());
+        transformAspect.worldRotation = transformAspect.worldRotation.RotateTowards(lookRotation, movementSettings.maxAngleDelta * DeltaTime);
+    }
+}
+```
+</CodeAccordion>
+<Caption>FollowPlayerJob (update)</Caption>
+
+And here is the result:
+
+<Video src={frontmatter.baseVideoUrl + "skeletons-flood.mp4"} alt="Skeleton Pathfinding" />
+<Caption>Good enough!</Caption>
+
+## Enemies step 3 : Kill'em all
+
+The last step for this *sprint* would be to add a system that checks for collisions between the axe and the skeletons, killing them in the process.
+
+
+I'm gonna create a `HitInfo` component and add hit to the entities being hit in the `EnemyCollisionLayer`.
+The position and normal properties will be useful for particle effects.
+
+```csharp
+public struct HitInfos : IComponentData
+{
+    public float3 Position;
+    public float3 Normal;
+}
+```
+
+
+### Collision Check
+
+I'm creating a `ThrownWeaponVsEnemyLayer` system that will run just before the `ThrownWeaponUpdateSystem`.
+
+I'll use a similar stepped collision check.
+The system creates an `AddComponentsCommandBuffer` and an `EntityCommandBuffer`, 
+gets the `EnemyCollisionLayer` and pass it to the `IJobEntity`below:
+
+```csharp
+[BurstCompile]
+partial struct ThrownWeaponCollisionJob : IJobEntity
+{
+    [ReadOnly] public CollisionLayer                                      EnemyCollisionLayer;
+    [ReadOnly] public float                                               DeltaTime;
+    public            AddComponentsCommandBuffer<HitInfos>.ParallelWriter AddComponentsCommandBuffer;
+    public            EntityCommandBuffer.ParallelWriter                  Ecb;
+    
+    public void Execute(
+        ref WorldTransform transform,
+        in ThrownWeaponComponent thrownWeapon,
+        in Collider collider
+    )
+    {
+        var transformQvs = transform.worldTransform;
+        var stepCount = 4;
+
+        var steppedSpeed = thrownWeapon.Speed / stepCount;
+        var steppedRotation = thrownWeapon.RotationSpeed / stepCount;
+
+        for (float i = 0; i < stepCount; i++)
+        {
+            if (Latios.Psyshock.Physics.ColliderCast(in collider, in transformQvs,
+                    transformQvs.position + thrownWeapon.Direction * thrownWeapon.Speed * DeltaTime,
+                    in EnemyCollisionLayer,
+                    out var hitInfos,
+                    out var bodyInfos))
+            {
+                AddComponentsCommandBuffer.Add(bodyInfos.entity, new HitInfos
+                {
+                    Position = hitInfos.hitpoint,
+                    Normal   = hitInfos.normalOnTarget * thrownWeapon.Speed
+                }, bodyInfos.bodyIndex);
+
+                Ecb.AddComponent<DeadTag>(bodyInfos.bodyIndex, bodyInfos.entity);
+            }
+
+
+            transformQvs.position += thrownWeapon.Direction * steppedSpeed * DeltaTime;
+            transformQvs.rotation = math.mul(transformQvs.rotation, Quat.RotateAroundAxis(
+                thrownWeapon.RotationAxis, steppedRotation * DeltaTime));
+        }
+    }
+}
+```
+
+### Now, you die.
+
+For now, when the enemy is hit, it will just play a random death animation and it's collider will be removed.
+
+I've added a system that disables Colliders on enemies with a dead tag in `LatiosWorldSyncGroup` :
+
+<CodeAccordion title="DisableDeadCollidersSystem">
+```csharp
+namespace Survivors.Play.Systems.Enemies
+{
+    [RequireMatchingQueriesForUpdate]
+    public partial struct DisableDeadCollidersSystem : ISystem
+    {
+        EntityQuery          _query;
+        LatiosWorldUnmanaged _world;
+
+        [BurstCompile]
+        public void OnCreate(ref SystemState state)
+        {
+            _query = state.Fluent()
+                .With<EnemyTag>()
+                .With<DeadTag>()
+                .With<Collider>()
+                .Build();
+
+            _world = state.GetLatiosWorldUnmanaged();
+        }
+
+        [BurstCompile]
+        public void OnUpdate(ref SystemState state)
+        {
+            var rcb = _world.syncPoint.CreateEntityCommandBuffer();
+
+            state.Dependency = new RemoveCollidersJob
+            {
+                CommandBuffer = rcb.AsParallelWriter()
+            }.ScheduleParallel(_query, state.Dependency);
+        }
+
+        [BurstCompile]
+        partial struct RemoveCollidersJob : IJobEntity
+        {
+            public EntityCommandBuffer.ParallelWriter CommandBuffer;
+
+            void Execute(Entity entity,
+                [EntityIndexInQuery] int index)
+            {
+                CommandBuffer.RemoveComponent<Collider>(index, entity);
+            }
+        }
+    }
+}
+```
+</CodeAccordion>
+
+
+For the animation-side, I'll start with an authoring script that will add a new Component that stores the death animations blob asset and a component that stores the clip states and the chosen death animation
+
+```csharp
+// Very similar to the `Clips` component
+public struct DeathClips : IComponentData
+{
+    public BlobAssetReference<SkeletonClipSetBlob> ClipSet;
+}
+
+public struct DeathClipsStates : IComponentData
+{
+    public ClipState StateA;
+    public ClipState StateB;
+    public ClipState StateC;
+    public int       ChosenState;
+}
+```
+
+I'll skip showing the authoring part, it is extremely similar to to the `ActionAuthoring` or the `FourDirectionsAnimationsAuthoring`scripts.
+
+The `SkeletonDeathSystem` introduces the use of Latio's `SystemRng` to pick a random animation from the 3 death animations. As described in the documentation:
+
+> `Rng` is a new type which provides deterministic, parallel, low bandwidth random
+numbers to your jobs. Simply call `Shuffle()` before passing it into a job, then
+access a unique sequence of random numbers using `GetSequence()` and passing in
+a unique integer (`chunkIndex`, `entityInQueryIndex`, ect). The returned
+sequence object can be used just like `Random` for the remainder of the job. You
+don’t even need to assign the state back to anything.
+>
+> Rng is based on the Noise-Based RNG presented in [this GDCTalk](https://www.youtube.com/watch?v=LWFzPP8ZbdU) but updated to a more recently shared version: [SquirrelNoise5](https://twitter.com/SquirrelTweets/status/1421251894274625536)
+
+
+- Step 1: Build a query in `OnCreate` that will be passed to the `IJobEntity`'s `ScheduleParallel` call.
+    ```csharp
+    [BurstCompile]
+    public void OnCreate(ref SystemState state)
+    {
+        m_latiosWorldUnmanaged = state.GetLatiosWorldUnmanaged();
+
+        m_query = state.Fluent()
+            .With<EnemyTag>()
+            .With<DeadTag>()
+            .WithAspect<OptimizedSkeletonAspect>()
+            .With<DeathClips>()
+            .With<DeathClipsStates>()
+            .Build();
+    }
+    ```
+- Step 2: Implement `ISystemNewScene`to seed the `SystemRng`.
+    ```csharp
+    public void OnNewScene(ref SystemState state)
+    {
+        state.InitSystemRng(new FixedString128Bytes("SkeletonDeathSystem"));
+    }
+    ```
+- Step 3: Add and implement `IJobEntityChunkBeginEnd` in the `IJobEntity`:
+    ```csharp
+    public bool OnChunkBegin(in ArchetypeChunk chunk,
+        int unfilteredChunkIndex,
+        bool useEnabledMask,
+        in v128 chunkEnabledMask)
+    {
+        Rng.BeginChunk(unfilteredChunkIndex);
+        return true;
+    }
+
+    // We don't care about the end of the chunk, but we need to implement it
+    public void OnChunkEnd(in ArchetypeChunk chunk,
+        int unfilteredChunkIndex,
+        bool useEnabledMask,
+        in v128 chunkEnabledMask,
+        bool chunkWasExecuted) { }
+    ```
+- Step 4: `Execute` -  Use the `SystemRng` to pick a random animation, play it and do not sample it when it has reached the end:
+    ```csharp
+    // ChosenState is set to -1 in the authoring behaviour, marking it as uninitialized
+    if (clipStates.ChosenState == -1) clipStates.ChosenState = Rng.NextInt(0, 3);
+    ref var state = ref clipStates.StateA;
+
+    switch (clipStates.ChosenState)
+    {
+        case 0:
+            state = ref clipStates.StateA;
+            break;
+        case 1:
+            state = ref clipStates.StateB;
+            break;
+        case 2:
+            state = ref clipStates.StateC;
+            break;
+    }
+
+
+    state.Update(DeltaTime * state.SpeedMultiplier);
+
+
+    // One shot clips
+    if (state.Time >= clips.ClipSet.Value.clips[clipStates.ChosenState].duration)
+    {
+        state.Time = clips.ClipSet.Value.clips[clipStates.ChosenState].duration;
+        return;
+    }
+
+
+    clips.ClipSet.Value.clips[clipStates.ChosenState].SamplePose(ref skeleton, state.Time, 1f);
+    skeleton.EndSamplingAndSync();
+    ```
+
+### Result
+
+<Video src={frontmatter.baseVideoUrl + "skeleton-death.mp4"} alt="Skeleton Death" />
+<Caption>Skeleton dying as if they weren't already dead.</Caption>
+
+## Conclusion
+
+Isn't it starting to look like a game?
+
+There is a lot of work left to do, though.
+- There are no real game mechanics yet
+- It is missing a lot of "juice" (SFX, VFX, etc.)
+- The enemies are not dangerous yet
+- It will get boring quickly with only one type of attack
+
+Still, I'm already having fun playing with it.
+
+I think that the next step should be about introducing Latios' implementation of SFX and VFX : Myri Audio and LifeFx.
+
+And here is the source code for this part of the project: [Source Part 4](https://github.com/clandais/Latios-Survivors-Articles/tree/Part4)
