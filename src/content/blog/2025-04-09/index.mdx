@@ -1,0 +1,200 @@
+---
+title: "Making a Survivors-like with Latios Framework Part 4.5"
+date: "Apr 13 2025"
+description: "Where I'm stress-testin' and bug-fixin'"
+draft: false
+baseVideoUrl: "../../vids/blog/latios-survivors-p4-5/"
+---
+
+import CodeAccordion from "@components/CodeAccordion.astro";
+import Link from "@components/Link.astro";
+import Caption from "@components/Caption.astro";
+import Video from "@components/Video.astro";
+import { Picture } from 'astro:assets';
+
+import levelLayout from './img/level-layout.png';
+import spawner from './img/spawner.png';
+import oops from './img/oops.png';
+import burst from './img/burst.png';
+import doneCompiling from './img/done-compiling.png';
+
+# Stress testin', bug fixin', refinin'
+
+I've decided to setup a benchmark scene.
+
+The level is a big square with enemy spawners at the 4 cardinal points.
+
+<Picture src={levelLayout} alt="Level Layout" />
+
+## "Exploding" Inertial Blends
+
+I've started by implemented a simple spawner for the skeletons.
+
+<Picture src={spawner} alt="Spawner" />
+
+I spawns skeletons every seconds and, while testing, boom! Something weird was happening.
+At first, it looked like *flickering*. Looking at it frame by frame, I could definitely see some gigantic polygons with each spawned skeletons.
+
+My first guess was that it had something to do with inertial blending. I already saw some weird glitching on the character when I was implementing it.
+
+I then proceeded to have a second (third, fourth, ...) at the documentation and stumbled on this:
+
+> Optimized skeletons require an initialization step. [...] but if the entity was instantiated after this point in the frame (sometime during SimulationSystemGroup), you may need to initialize the entity manually via the ForceInitialize() method.
+
+Adding this to the spawner super system didn't help but didn't hurt either.
+ ```csharp
+    [UpdateInGroup(typeof(PostSyncPointGroup))]
+    [UpdateBefore(typeof(MotionHistoryUpdateSuperSystem))]
+```
+
+What fixed the issue was tweaking the checks for inertial blending inside `FourDirectionAnimationSystem` and defaulting the `InertialBlendState`component's `PreviousDeltaTime` to -1, treating it has uninitialized.
+
+```csharp
+    // Detect significant direction/movement change (for starting new blend)
+    var significantChange = math.abs(
+    math.length(velocity.xz) - math.length(previousVelocity.Value.xz)) > inertialBlendState.VelocityChangeThreshold;
+
+    // Start new inertial blend when movement changes significantly
+    if (significantChange) // [!code --]
+    if (significantChange && inertialBlendState.PreviousDeltaTime > 0f) // [!code ++]
+    {
+        skeleton.StartNewInertialBlend(inertialBlendState.PreviousDeltaTime, inertialBlendState.Duration);
+        inertialBlendState.TimeInCurrentState = 0f;
+    }
+
+    // Apply inertial blend with current time since blend started
+    if (inertialBlendState.TimeInCurrentState <= inertialBlendState.Duration) // [!code --]
+    if (!skeleton.IsFinishedWithInertialBlend(inertialBlendState.TimeInCurrentState)) // [!code ++]
+    {
+    
+        inertialBlendState.TimeInCurrentState += DeltaTime;
+        skeleton.InertialBlend(inertialBlendState.TimeInCurrentState);
+    }
+
+```
+
+## vector Field's Grid
+
+I wanted to have a more fine grained vector field grid constructions.
+
+Until now, to build the grid, a bunch of raycasts were sent to the `EnvironmentCollisionLayer`. If it hits, it meant that it was hitting the level and, so, it meant it was walkable... Meaning that if it hits a wall, it was treated as walkable too. 😕
+
+My solution may not be the smartest nor the simplest but it worked.
+
+Step by step:
+- Add a `NavMesh Modifier` to every prefabs that are used in the level.
+- Add a `NavMesh Surface` to a game object in the scene.
+- Create an editor script that will turn the `NavMesh` into a `MeshCollider`
+- Exclude this `MeshCollider` from the `EnvironmentCollisionLayer` and add it to a custom layer.
+- Raycast hit to build the grid.
+
+And... Nope. The generated mesh was okay but, using Psyshocks visual debugging tools, I could see that the collider was missing half its triangles.
+
+Step by step part 2:
+- Feel a bit stupid.
+- Ask for help on the discord and feel a bit more stupid (personal issue with asking for help, working on it. Latios' community is awesome).
+- Debug the hell out of it.
+- Find a regression in Latios's `TriMeshCollider` baking.
+- Feel like a real open source contributor!
+
+## Enemies getting NaN'd and Path Following enhancements
+
+JavaScript PTSD kicking in. Who would have thought that a simple `float2` could be `NaN` in C#? I've tried to look for answers on the internet but couldn't find anything.
+I'm guessing that it is due to some of `Unity.Mathematics`'s optimizations and me normalizing zero-length float2s.
+
+Which system was moving the enemies? Well, it is Anna's `SolveSystem` but I was pretty sure that this system was doing its job.
+On the other hand, my quick and dirty `FollowPlayerSystem` was probably not taking into account every cases where the vector math could result to NaNs.
+
+
+So, as a first step, I added a bunch of checks. I just discovered that there was a `bool2 math.isnan(float2 x)` function.
+
+Next, I took another direction (while still leaving the checks in place), adding more methods to the grid and realized I didn't used Latios' `ICollectionAspect` yet.
+
+`ICollectionAspect` makes a lot of sense. First, it's quite ugly having components that acts like your average corporate 2.5k lines Java class.
+From what I understand, components, in ECS, are supposed to be data containers. Unity's `IAspect` is quite elegant to help bridging the DoD and OOPS worlds. Latios' `ICollectionAspect` does this for your `ICollectionComponent`.
+
+Yes. I got sidetracked but I added bilinear interpolation to the `VectorFieldAspect`. I also added a `float2 GetVectorSafe(int2 cellPos)` that returns `float2.zero`if out of bounds.
+Sampling the vector field with bilinear interpolation and clamping the result to the grid size should be enough to avoid NaNs and get smoother path following.
+
+
+## Being a N00B
+
+### Part 1 - Mixing Psyshock's compound colliders and Anna's EnvironmentCollisionLayer
+
+With this done, I started to stress test the game. I added a bunch of skeletons and... performance was dropping quickly.
+
+Back to the Discord to ask for help. Dreaming had a look at my scene and... Oops.
+
+<Picture src={oops} alt="Oops" />
+<Caption>Dreaming: And I found your performance problem.</Caption>
+
+> Compound colliders in Psyshock don't have any acceleration structure currently. So stuffing the entire level into a single compound defeats all the optimizations.
+>
+> What you probably want is to set the Collision Tag Authoring to Include Environment Recursively, and then delete the Custom Collider.
+
+Much better!
+
+### Part 2 - `AddComponentsCommandBuffer` cannot add zero-sized components
+
+Well, it can't... but it can anyway.
+
+AT first, in the job that checks for collisions between the axe and the ennemies, I tried to use `AddComponentsCommandBuffer` in this way:
+    
+```csharp
+var addComponentsCommandBuffer =
+    m_latiosWorldUnmanaged.syncPoint.CreateAddComponentsCommandBuffer<HitInfos, DeadTag>(AddComponentsDestroyedEntityResolution.DropData);
+```
+
+`DeadTag` being a zero-sized component. I was getting yelled at by the compiler. So, I resorted to pass another ECB to the job on top of this one.
+
+Dreaming :
+> I noticed you missed this API in your recent blog: https://github.com/Dreaming381/Latios-Framework/blob/master/Core/Containers/CommandBuffers/AddComponentsCommandBuffer.cs#L107
+
+
+![D'oh](https://i.giphy.com/xT5LMzIK1AdZJ4cYW4.webp)
+
+
+*Fixed!*
+
+```csharp
+    var addComponentsCommandBuffer =
+        m_latiosWorldUnmanaged.syncPoint.CreateAddComponentsCommandBuffer<HitInfos>(AddComponentsDestroyedEntityResolution.DropData);
+
+    // Auto-magically add DeadTag when adding HitInfos !
+    addComponentsCommandBuffer.AddComponentTag<DeadTag>();
+```
+
+
+Already better but...
+
+### Part 3 - What to do when benchmarking
+
+Dreaming :
+> You may have safety checks, jobs debugger, and leak detection enabled (always disable these when benchmarking)> You may have safety checks, jobs debugger, and leak detection enabled (always disable these when benchmarking)
+
+Well, yes. And VSync is on too.
+
+And I need more RAM. Typing this in VSCode while `Burst Compiling` feels like using a cloud based IDE.
+
+<Picture src={burst} alt="Burst Compiling" />
+
+<Picture src={doneCompiling} alt="Done Compiling" />
+<Caption>Nice, burst is done compiling. I can finally use the 12% RAM left 🤩</Caption>
+
+And I need to move a lot of junk from the SSD to the external SSD because the profiler is constantly complaining about pagefile and disk usage (and RAM).
+
+
+![Nasa computer](https://media3.giphy.com/media/v1.Y2lkPTc5MGI3NjExcmg3MHMxNWRrMDF1ZW1qcHphbTVrcjZjNGJyeDdtOWlsNzh6bXp1MSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/VhErKxOVtnvVxW6xEw/giphy.gif)
+
+ ## Benchmarking Checklist:
+- [ ] Safety checks disabled
+- [ ] Jobs debugger disabled
+- [ ] Leak detection disabled
+- [ ] Native Debug Compilation disabled
+- [ ] All entities windows closed 
+
+## Conclusion
+
+That was a short article but it was fun to write and especially awesome to have Dreaming helping me out with the issues I was having and look at my code.
+
+[Part 4.5 Source Code](https://github.com/clandais/Latios-Survivors-Articles/tree/Part4.5-Benchmark)
