@@ -31,6 +31,7 @@ const projects = defineCollection({
     demoURL: z.string().optional(),
     repoURL: z.string().optional(),
     websiteURL: z.string().optional(),
+    edited: z.coerce.date().optional(),
   }),
 });
 
