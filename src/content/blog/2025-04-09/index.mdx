@@ -1,6 +1,7 @@
 ---
 title: "Making a Survivors-like with Latios Framework Part 4.5"
 date: "Apr 13 2025"
+edited: "Apr 15 2025"
 description: "Where I'm stress-testin' and bug-fixin'"
 draft: false
 baseVideoUrl: "../../vids/blog/latios-survivors-p4-5/"
@@ -17,6 +18,7 @@ import spawner from './img/spawner.png';
 import oops from './img/oops.png';
 import burst from './img/burst.png';
 import doneCompiling from './img/done-compiling.png';
+import fullTimeline from './img/full-timeline.png';
 
 # Stress testin', bug fixin', refinin'
 
@@ -73,7 +75,7 @@ What fixed the issue was tweaking the checks for inertial blending inside `FourD
 
 ```
 
-## vector Field's Grid
+## Vector Field's Grid
 
 I wanted to have a more fine grained vector field grid constructions.
 
@@ -148,7 +150,7 @@ var addComponentsCommandBuffer =
 `DeadTag` being a zero-sized component. I was getting yelled at by the compiler. So, I resorted to pass another ECB to the job on top of this one.
 
 Dreaming :
-> I noticed you missed this API in your recent blog: https://github.com/Dreaming381/Latios-Framework/blob/master/Core/Containers/CommandBuffers/AddComponentsCommandBuffer.cs#L107
+> I noticed you missed this API in your recent blog: [AddComponentsCommandBuffer.cs#L107](https://github.com/Dreaming381/Latios-Framework/blob/master/Core/Containers/CommandBuffers/AddComponentsCommandBuffer.cs#L107)
 
 
 ![D'oh](https://i.giphy.com/xT5LMzIK1AdZJ4cYW4.webp)
@@ -193,8 +195,192 @@ And I need to move a lot of junk from the SSD to the external SSD because the pr
 - [ ] Native Debug Compilation disabled
 - [ ] All entities windows closed 
 
+
+
+## Dreaming's "Reading the Timeline" Masterclass
+
+Dreaming was kind enough to share his profiling breakdown with me and the community.
+It is so detailed that I thought it would be a good idea to share it here.
+
+<Picture src={fullTimeline} alt="Full Timeline" />
+<Caption>Dreaming's Annotated Timeline with around 3k enemies</Caption>
+
+He used this revision [9e96dee](https://github.com/clandais/Latios-Survivors-Articles/tree/9e96dee415b342a191e2cb9c91305e99bd9cc056),
+removed a `Debug.Log` that I let slip through, changed the Cascade Count from 4 to 2 in the "Pc_RPAsset" and put the spawn rated to an interval of 0.1 seconds to reach a high number of moving enemies quickly.
+
+### A: Semaphore.WaitForSignal
+
+import a from './img/annotated-timeline/a.png';
+
+<Picture src={a} alt="A" />
+
+> This marker is a tell-tale sign of being GPU bound, either due to excessive uploads or excessive rendering. In this case, it is the latter due to the high poly count on the enemies.
+> LOD Groups are definitely needed.
+
+I guess I should investigate LOD Groups ASAP.
+
+### B: Big Batch 
+
+import b from './img/annotated-timeline/b.png';
+
+<Picture src={b} alt="B" />
+
+> This batch being this big can mean one of three things:
+> 1) Too much transparency - not the case here
+> 2) Poor chunk capacity and/or utilization - also not the case here
+> 3) GPU-bound - our case (and I have no idea why being GPU-bound makes this task take a lot longer, but it does)
+
+### C: Anna's Update 
+
+import c from './img/annotated-timeline/c.png';
+
+<Picture src={c} alt="C" />
+
+> This is Anna's update.
+> It takes 3 milliseconds to perform the full simulation, which is a little pricy, but then again, that's **3000 rigid bodies** all fighting to reach the player, so there is a lot going on.
+> The thread distribution is a lot better, as this used to take 5 milliseconds.
+>
+> However, a third of the time is being spent on contact generation between the capsules, and the other two thirds on solving it (with some gaps), so there's probably some narrow phase optimization potential there.
+> I'd need a sampling profile to investigate further though.
+
+### D: Animation Processing
+import d from './img/annotated-timeline/d.png';
+
+<Picture src={d} alt="D" />
+
+> Animation is processing 150k bones in 3 milliseconds, which is a little slow on my PC.
+> I'm unsure if this is sampling or inertial blending.
+> Again, I'd need a sampling profiler to determine that.
+
+
+### E: Culling
+
+import e from './img/annotated-timeline/e.png';
+
+<Picture src={e} alt="E" />
+
+> The two batches of culling jobs are perfectly taking just enough time to end right around the time URP finishes setting up the render graph and is ready to start the dispatch phase.
+
+
+### F: Dispatch
+
+import f from './img/annotated-timeline/f.png';
+
+<Picture src={f} alt="F" />
+
+> The dispatch phase is bottlenecked primarily by uploading the skeletons to the GPU.
+> That's not surprising if you've seen what this benchmark looks like in the game view.
+
+
+### G: Transforms Updates
+
+import g from './img/annotated-timeline/g.png';
+
+<Picture src={g} alt="G" />
+
+> Transform updating is very close to the threshold where switching to extreme transforms might be better.
+> However, I suspect a lot of this may be due to H.
+
+
+### H: Sockets Updates
+
+import h from './img/annotated-timeline/h.png';
+
+<Picture src={h} alt="H" />
+
+> There are a high number of sockets updating, and it seems most of these sockets are unused at this time.
+> So this could probably be made smaller.
+
+### I: Culling Bounds Updates
+
+import i from './img/annotated-timeline/i.png';
+
+<Picture src={i} alt="I" />
+
+> Updating culling bounds for 150k bones is a lot, but most likely I don't have the most optimal algorithm in place for doing this.
+> That might be a potential optimization in the future when it is high enough priority.
+
+
+### J: Axis Locking
+
+import j from './img/annotated-timeline/j.png';
+
+<Picture src={j} alt="J" />
+
+> This is a bubble in Anna's setup specifically due to axis locking.
+> This is because writing locking and joint constraint pairs to a PairStream is a single-threaded operation.
+> I think I will probably need to improve this at some point and allow writing arbitrary pairs in parallel somehow.
+
+
+### K: Sync Point
+
+import k from './img/annotated-timeline/k.png';
+
+<Picture src={k} alt="K" />
+
+> It is super common for projects to introduce a sync point like this.
+> This is syncing on transforms because the main thread is copying the transform into a location that GameObjects can read (and in this case, for the Cinemachine target)
+
+### L: Another Bubble
+
+import l from './img/annotated-timeline/l.png';
+
+<Picture src={l} alt="L" />
+
+> Another bubble, this time in dispatch due to the high number of skeletons.
+> In this case the bubble is fairly small, but it is something I've been watching for a while in case I need to switch up the approach.
+> This bubble can be easily filled by using blend shapes, dynamic and unique meshes, and Calligraphics.
+> Material property uploads tried to fill the bubble, but they didn't have enough work to do.
+
+### M: Another Sync Point
+
+import m from './img/annotated-timeline/m.png';
+
+<Picture src={m} alt="M" />
+
+> This is the primary structural change sync point, which takes 1 millisecond.
+> I'm not worried about it, because I've increased the spawn rate by 10x, so it is a little exaggerated.
+
+### N: I'm not blushing
+
+import n from './img/annotated-timeline/n.png';
+
+<Picture src={n} alt="N" />
+
+> Fast gameplay code is fast. Kudos!
+
+![Blushing](https://i.giphy.com/9n5UIlRppk91e.webp)
+
+We'll see when there will be more stuff happening...
+
+
+## LOD Groups
+
+Kinemation can bake Unity's LOD Groups for skinned meshes.
+
+Reading at the Unity documentation, it looks like assigning meshes to a LOD group can be simplified by prefixing every meshes with `LOD0`, `LOD1`, `LOD2`, etc.
+I then proceeded to import the skeleton fbx into Blender and duplicate each mesh, renaming them with the prefix applying a "decimate" modifier to each of them... And was wondering "someone must already have automated this".
+
+Yes, someone did! Multiple people did, in fact.
+
+I've found this blender addon [LODs Maker](https://superhivemarket.com/products/lods-maker--create-level-of-details-in-1-click) that does exactly what I was looking for. It even has a handy button to "apply transforms" so that Kinemation's LOD baker won't complain about having meshes with different world transforms.
+
+import lodsMaker from './img/lods-maker.png';
+
+<Picture src={lodsMaker} alt="LODs Maker" />
+<Caption>That was quick!</Caption>
+
+Giving it a "benchmark" try, I was able to fill the benchmark scene with more skeletons than it can contain... and with pretty low FPS but that is already 4 times better than before.
+
+import weAreFull from './img/we-are-full.png';
+
+<Picture src={weAreFull} alt="We are full" />
+<Caption>We are full!</Caption>
+
 ## Conclusion
 
 That was a short article but it was fun to write and especially awesome to have Dreaming helping me out with the issues I was having and look at my code.
+
+His timeline breakdown was super interesting and I learned a lot from it.
 
 [Part 4.5 Source Code](https://github.com/clandais/Latios-Survivors-Articles/tree/Part4.5-Benchmark)

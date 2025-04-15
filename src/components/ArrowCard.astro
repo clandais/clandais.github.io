@@ -17,10 +17,19 @@ const { entry } = Astro.props;
         day: "numeric",
       })}
     </div>
+    <div class="text-sm opacity-75">
+      {entry.data.edited ? " (Edited)" : ""} 
+      {entry.data.edited?.toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      }) ?? ""}
+  
+    </div>
     <div class="font-semibold">
       {entry.data.title}
     </div>
-    <div class="text-sm">
+    <div class="text-sm opacity-75">
       {entry.data.description}
     </div>
   </div>
