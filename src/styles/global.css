@@ -97,7 +97,7 @@ html.scrolled #back-to-top {
 }
 
 .line.diff:before {
-  position: absolute;
+  position: relative;
   left: 5px;
 }
 

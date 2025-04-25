@@ -11,7 +11,7 @@ export default {
         
         // Then generate TOC with those IDs
         [rehypeToc, {
-            headings: ['h2', 'h3'],
+            headings: ['h2', 'h3', 'h4'],
             cssClasses: {
                 toc: 'toc',
                 list: 'toc-list',
