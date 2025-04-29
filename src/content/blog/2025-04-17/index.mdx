@@ -1,8 +1,8 @@
 ---
 title: "Making a Survivors-like with Latios Framework Part 5"
-date: "Apr 17 2025"
+date: "Apr 29 2025"
 description: "Where SFXs and VFXs are added to the game."
-draft: true
+draft: false
 baseVideoUrl: "../../vids/blog/latios-survivors-p5/"
 ---
 
@@ -16,8 +16,11 @@ import { Tweet, Vimeo, YouTube } from 'astro-embed';
 
 Goals:
 - Let's add some footsteps SFX for the Player as a learning experience.
-- Refactor the SFX system to be more efficient.
+- Refactor the SFX system to be more efficient (or not).
 - Add some SFX to the axe prefab.
+- Add some SFX to the enemies when they are hit.
+- Add some VFX to the axe.
+- Add some Shader Graphs effects to the Skeletons. 
 
 ## Adding footsteps SFX to the Player
 
@@ -299,304 +302,138 @@ Indeed, the default size for each buffer on an entity is 128 bytes!
 
 ![WTF](https://c.tenor.com/wqirNJF--_MAAAAC/tenor.gif)
 
-### Refactoring
+## Refactoring
 
-#### One prefab to rule them all (or at least a few)
 
-Now, I'll be using a prefab that contains the list of SFXs but won't instantiate it.
+At first, I went down the road of having entities reference some SFX prefabs that are holding a buffer of SFX prefabs.
+Then, I found that this setup was not well suited for entities that spawned different kinds of SFXs "events". It became quite cumbersome to pass a bunch of `ComponentLookup`s and `BufferLookup`s to jobs.
 
-The authoring component for the prefab will look like this:
+It started to look like a *brain fart* and I started to get really confused when triggering an event from an entity that had a reference to an entity that had a reference to an entity that had a list of references...
+
+
+So, I'll try again, keep it simple, set the `InternalBufferCapacity` to a low number and see if it is an issue (performance-wise) later.
+
+### Axe Swoosh SFX
+
+Most entities that will send an SFX event to the queue will have a similar authoring behaviour.
 
 ```csharp
-
-namespace Survivors.Play.Authoring.SFX
+namespace Survivors.Play.Authoring.Player.Weapons
 {
     [DisallowMultipleComponent]
-    [AddComponentMenu("Survivors/Play/SFX/One Shot SFX List")]
-    public class OneShotSfxListAuthoring : MonoBehaviour
+    [AddComponentMenu("Survivors/Player/Weapon/AxeSwoosh")]
+    public class AxeSwooshAuthoring : MonoBehaviour
     {
-        [SerializeField] List<GameObject> oneShotSfxPrefabs;
+        [SerializeField] List<GameObject> swooshPrefabs;
+        [SerializeField] ESfxEventType    eventType;
 
-        class OneShotSfxListAuthoringBaker : Baker<OneShotSfxListAuthoring>
+        class AxeSwooshAuthoringBaker : Baker<AxeSwooshAuthoring>
         {
-            public override void Bake(OneShotSfxListAuthoring authoring)
+            public override void Bake(AxeSwooshAuthoring authoring)
             {
-                if (authoring.oneShotSfxPrefabs.Count == 0) return;
+                var entity = GetEntity(TransformUsageFlags.Dynamic);
+                var buffer = AddBuffer<AxeSwooshBufferElement>(entity);
 
-
-                var entity = GetEntity(TransformUsageFlags.None);
-
-                AddComponent(entity, new OneShotSfxSpawner
+                foreach (var swooshPrefab in authoring.swooshPrefabs)
                 {
-                    SfxCount = authoring.oneShotSfxPrefabs.Count
-                });
-
-                var buffer = AddBuffer<OneShotSfxElement>(entity);
-                foreach (var prefab in authoring.oneShotSfxPrefabs)
-                    buffer.Add(new OneShotSfxElement
+                    var prefab = GetEntity(swooshPrefab, TransformUsageFlags.Dynamic);
+                    buffer.Add(new AxeSwooshBufferElement
                     {
-                        Prefab = GetEntity(prefab, TransformUsageFlags.Dynamic)
+                        SwooshPrefab = prefab
                     });
+                }
             }
         }
     }
+
+    [InternalBufferCapacity(8)]
+    public struct AxeSwooshBufferElement : IBufferElementData
+    {
+        public EntityWith<Prefab> SwooshPrefab;
+    }
 }
 ```
 
-And the related component will look like this:
+The `AxeSwooshBufferElement` is intended to be used when the axe is spawned. So I'm modifying the `WeaponThrowTriggerSystem` and proceed to pick an SFX in a similar fashion than in `FourDirectionsAnimationEventsSystem`.
 
+
+### Enemy Hit SFX
+
+When the axe collides with an enemy, it adds a `HitInfos` component to this enemy and a `DeadTag`.
+
+The `DeadTag` is temporary. It's function is to make the dead entity "pass through" the `DisableDeadCollidersSystem` and, then, the `SkeletonDeathSystem`.
+It will be added elsewhere once the enemies will have and health system implemented.
+
+Since I want the enemies to be able to play some SFX when being hit,
+I can already create a new system that will handle enemies with the `HitInfos` component and play the "egg crackling" SFX.
+
+<CodeAccordion title="SkeletonHitInfosUpdateSystem.cs">
 ```csharp
-public struct OneShotSfxSpawner : IComponentData
+namespace Survivors.Play.Systems.Enemies
 {
-    public int SfxCount;
-}
-
-//  8 is good enough for now, we can change it later if needed
-[InternalBufferCapacity(8)]
-public struct OneShotSfxElement : IBufferElementData
-{
-    public Entity Prefab;
-}
-```
-
-The entity that will trigger the SFX will need a reference to the prefab entity.
-
-```csharp
-    // Editor-only
-    [Serializable]
-    public struct SfxListRef
+    public partial struct SkeletonHitInfosUpdateSystem : ISystem, ISystemNewScene
     {
-        public OneShotSfxListAuthoring oneShotSfxPrefabs;
-        public ESfxEventType           eventType;
-    }
+        EntityQuery          m_query;
+        LatiosWorldUnmanaged m_world;
 
-    public struct OneShotSfxSpawnerRef : IComponentData
-    {
-        public EntityWith<Prefab> SfxPrefab;
-        public ESfxEventType      EventType;
-    }
-
-    
-    /// <summary>
-    ///     I don't know what I'm doing with this yet.
-    /// </summary>
-    public enum ESfxEventType
-    {
-        None,
-        Footstep,
-        AxeSwoosh,
-        SkeletonHit
-    }
-```
-
-Then, I'm updating the `FourDirectionsAnimationEventsSystem` to conform to the new components.
-
-#### OnCreate
-
-```csharp
-    [BurstCompile]
-    public void OnCreate(ref SystemState state)
-    {
-        m_worldUnmanaged = state.GetLatiosWorldUnmanaged();
-
-        m_query = state.Fluent()
-            .With<Clips>()
-            .With<WorldTransform>()
-            .With<FourDirectionClipStates>()
-            .With<FootstepBufferElement>()                                  // [!code --]
-            .With<OneShotSfxSpawnerRef>()                                   // [!code ++]
-            .Build();
-    }
-```
-
-#### AnimationEventsJob.Execute 
-```csharp
-    void Execute(
-        in FourDirectionClipStates clipStates,
-        in Clips clips,
-        in WorldTransform worldTransform,
-        DynamicBuffer<FootstepBufferElement> footstepsPrefabs                   // [!code --]
-        in OneShotSfxSpawnerRef oneShotSfxSpawner                               // [!code ++]
-    )
-```
-
-#### Picking the prefab inside the job
-```csharp
-
-
-    var prefabIndex = Rng.NextInt(0, footstepsPrefabs.Length);                  // [!code --]
-    
-    var sfxPrefab = GetSfx(oneShotSfxSpawner);                                  // [!code ++]
-    if (sfxPrefab == Entity.Null) continue;                                     // [!code ++]
-
-
-    SfxQueue.Enqueue(new SfxSpawnQueue.SfxSpawnData
-    {
-        EventHash = evt,                                                        // [!code --]
-        EventType = ESfxEventType.Footstep,                                     // [!code ++]
-        Position  = worldTransform.position,
-        SfxPrefab = footstepsPrefabs[prefabIndex].FootstepPrefab                // [!code --]
-        SfxPrefab = sfxPrefab                                                   // [!code ++]
-    });
-
-
-    Entity GetSfx(in OneShotSfxSpawnerRef oneShotSfxSpawner)                    //[!code ++]
-    {                                                                           //[!code ++]
-        var spawner = SpawnerLookup[oneShotSfxSpawner.SfxPrefab];               //[!code ++]
-        var buffer = FootstepsPrefabsLookup[oneShotSfxSpawner.SfxPrefab];       //[!code ++]
-        if (buffer.Length == 0) return Entity.Null;                             //[!code ++]
-        var prefabIndex = Rng.NextInt(0, spawner.SfxCount);                     //[!code ++]
-        return buffer[prefabIndex].Prefab;                                      //[!code ++]
-    }                                                                           //[!code ++]                                  
-```
-
-#### Tweaking the Spawn Queue System to run in parallel
-
-Here, I'm replacing the `SfxSpawnJob` with an `IJobParallelFor` passing him a `TempJob`  
-
-<CodeAccordion title="SfxSpawnJobParallelFor">
-```csharp
-
-     [BurstCompile]
-    public void OnUpdate(ref SystemState state)
-    {
-        // [...]
-        var qToArray = sfxQueue.ToArray(Allocator.TempJob);
-        state.Dependency = new SfxSpawnJobParallelFor
-        {
-            SfxQueue         = qToArray,
-            SpawnQueueWriter = icb.AsParallelWriter()
-        }.Schedule(sfxQueue.Count, 128, state.Dependency);
-
-        qToArray.Dispose(state.Dependency);
-        sfxQueue.Clear();
-    }
-
-    [BurstCompile]
-    struct SfxSpawnJobParallelFor : IJobParallelFor
-    {
-        [NativeDisableParallelForRestriction] public NativeArray<SfxSpawnQueue.SfxSpawnData> SfxQueue;
-        public InstantiateCommandBuffer<WorldTransform>.ParallelWriter SpawnQueueWriter;
-
-        public void Execute(int index)
-        {
-            if (index < SfxQueue.Length)
-            {
-                var data = SfxQueue[index];
-
-                var transform = new WorldTransform
-                {
-                    worldTransform = TransformQvvs.identity
-                };
-
-                transform.worldTransform.position = data.Position;
-
-                SpawnQueueWriter.Add(
-                    data.SfxPrefab, transform, index);
-            }
-        }
-    }
-```
-</CodeAccordion>
-
-## Adding SFX to the axe and skeleton prefabs
-
-### IEnableableComponent
-
-I'm adding a swoosh sound to the axe prefab and a hit sound to the skeleton prefab.
-
-Spawning SFXs with the axe and the skeleton is a bit different than with the footsteps as it 
-does not rely on animation events but on the prefab entity instantiation for the axe and the hit that kills it for the skeleton.
-
-Let's add a new component tag :
-```csharp
-    public struct SfxTriggeredTag : IComponentData, IEnableableComponent { }
-```
-
-In the axe's authoring script, the component is set to enabled as I want it to be triggered when the axe is spawned.
-For the skeleton, the component is set to disabled. I want to trigger the SFX when the skeleton is killed.
-
-### A new "generic" system
-
-I felt smart and created a system that enqueues SFXs for each entities with the `SfxTriggeredTag`.
-
-I will probably have to rewrite it because : What if an entity has multiple lists of SFXs?
-
-<CodeAccordion title="OneShotSfxFromListEnqueueSystem.cs">
-```csharp
-
-namespace Survivors.Play.Systems.Player.Weapons.Spawn
-{
-    [BurstCompile]
-    public partial struct OneShotSfxFromListEnqueueSystem : ISystem, ISystemNewScene
-    {
-        LatiosWorldUnmanaged m_worldUnmanaged;
-        EntityQuery          m_entityQuery;
 
         [BurstCompile]
         public void OnCreate(ref SystemState state)
         {
-            m_worldUnmanaged = state.GetLatiosWorldUnmanaged();
-            m_entityQuery = state.Fluent()
+            m_query = state.Fluent()
                 .With<WorldTransform>()
-                .With<OneShotSfxSpawnerRef>()
-                .WithEnabled<SfxTriggeredTag>()
+                .With<EnemyTag>()
+                .WithEnabled<HitInfos>()
+                .With<SkeletonHitSfxBufferElement>()
                 .Build();
-        }
 
-        public void OnNewScene(ref SystemState state)
-        {
-            state.InitSystemRng("WeaponSfxSpawnSystem");
+            m_world = state.GetLatiosWorldUnmanaged();
         }
 
         [BurstCompile]
         public void OnUpdate(ref SystemState state)
         {
-            state.Dependency = new SfxEnqueueJob
-            {
-                SfxQueue = m_worldUnmanaged.sceneBlackboardEntity.GetCollectionComponent<SfxSpawnQueue>().SfxQueue
-                    .AsParallelWriter(),
-                SfxTriggeredTags           = SystemAPI.GetComponentLookup<SfxTriggeredTag>(),
-                SpawnerLookup    = SystemAPI.GetComponentLookup<OneShotSfxSpawner>(true),
-                SfxPrefabsLookup = SystemAPI.GetBufferLookup<OneShotSfxElement>(true),
-                Rng              = state.GetJobRng()
-            }.ScheduleParallel(m_entityQuery, state.Dependency);
+            var sfxQueue = m_world.sceneBlackboardEntity.GetCollectionComponent<SfxSpawnQueue>()
+                .SfxQueue;
 
-            state.Dependency.Complete();
+            state.Dependency = new HitInfosUpdateJob
+            {
+                Rng            = state.GetJobRng(),
+                SfxQueue       = sfxQueue.AsParallelWriter(),
+                HitInfosLookup = SystemAPI.GetComponentLookup<HitInfos>()
+            }.Schedule(m_query, state.Dependency);
         }
 
 
-        [BurstCompile]
-        partial struct SfxEnqueueJob : IJobEntity, IJobEntityChunkBeginEnd
+        public void OnNewScene(ref SystemState state)
         {
-            [NativeDisableParallelForRestriction]
-            public NativeQueue<SfxSpawnQueue.SfxSpawnData>.ParallelWriter SfxQueue;
+            state.InitSystemRng("SkeletonHitInfosUpdateSystem");
+        }
 
-            [ReadOnly] public ComponentLookup<OneShotSfxSpawner> SpawnerLookup;
-            [ReadOnly] public BufferLookup<OneShotSfxElement>    SfxPrefabsLookup;
-            [NativeDisableParallelForRestriction] public ComponentLookup<SfxTriggeredTag> SfxTriggeredTags;
-
+        [BurstCompile]
+        partial struct HitInfosUpdateJob : IJobEntity, IJobEntityChunkBeginEnd
+        {
             public SystemRng Rng;
+            public NativeQueue<SfxSpawnQueue.SfxSpawnData>.ParallelWriter SfxQueue;
+            [NativeDisableParallelForRestriction] public ComponentLookup<HitInfos> HitInfosLookup;
 
-            void Execute(Entity entity, [EntityIndexInQuery] int index,
+            void Execute(
+                Entity entity,
+                [EntityIndexInQuery] int index,
                 in WorldTransform worldTransform,
-                in OneShotSfxSpawnerRef sfxSpawnerRef)
+                in DynamicBuffer<SkeletonHitSfxBufferElement> sfxBuffer)
             {
-                var sfxSpawner = SpawnerLookup[sfxSpawnerRef.SfxPrefab];
-                var sfxPrefabs = SfxPrefabsLookup[sfxSpawnerRef.SfxPrefab];
-
-                var sfxPrefab = sfxPrefabs[Rng.NextInt(0, sfxSpawner.SfxCount)].Prefab;
-
+                var prefabIndex = Rng.NextInt(0, sfxBuffer.Length);
                 SfxQueue.Enqueue(new SfxSpawnQueue.SfxSpawnData
                 {
-                    SfxPrefab = sfxPrefab,
-                    Position  = worldTransform.position,
-                    EventType = sfxSpawnerRef.EventType
+                    SfxPrefab = sfxBuffer[prefabIndex].SfxPrefab,
+                    Position  = worldTransform.position
                 });
 
-                SfxTriggeredTags.SetComponentEnabled(bodyInfos.entity, true);
+                // TODO: Add logic to handle HitInfos component
+                
+                HitInfosLookup.SetComponentEnabled(entity, false);
             }
-
 
             public bool OnChunkBegin(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask,
                 in v128 chunkEnabledMask)
@@ -614,4 +451,243 @@ namespace Survivors.Play.Systems.Player.Weapons.Spawn
 ```
 </CodeAccordion>
 
-<Caption>OneShotSfxFromListEnqueueSystem adds a new SFX to the spawn queue for each entities with the SfxTriggeredTag enabled</Caption>
+### Result 
+
+Here's a video showcasing the footsteps, axe swoosh and enemy hit SFXs in action.
+
+<YouTube id="23rGLJqtslQ" />
+
+#### Aside
+
+Did you notice some color differences on the ground tiles?
+I'm *retopologizing* the assets as I noticed that the level alone had around 400k vertices.
+While baking textures, it gave me some slight color differences. The lighter-ones are the original ones.
+
+## Adding VFXs
+
+### LifeFX
+
+> LifeFX is a visual effects and graphics programming module built on top of Kinemation.
+> Currently, it mainly serves as a bridge to Unity VFX Graph.
+> But this bridge can also be leveraged for many other graphics operations.
+
+- LifeFX uses a *postal system* to send events to the GPU.
+- it broadcasts graphics buffer data generated from the ECS world to the GameObject world.
+- It comes with *out-of-the-box* support for Unity VFX Graph.
+
+### Adding an *Hit* VFX to the axe
+
+
+I wanted to add a VFX when the axe hits and enemy and I've found this nice YouTube video from [by Gabriel Aguiar](https://www.youtube.com/watch?v=jSIan1cEYTI&t=471s).
+
+LifeFX's documentation give's a pretty good example of how to setup a simple VFX event : [here](https://github.com/Dreaming381/Latios-Framework-Documentation/blob/main/LifeFX/Getting%20Started.md#making-your-first-lifefx-effect).
+It works very well for a VFX Graph containing a single spawn event.
+
+![Sample](https://github.com/Dreaming381/Latios-Framework-Documentation/blob/main/LifeFX/media/54524012ec75eae44faff7cc37107fd8.png?raw=true)
+
+To integrate the VFX from the video, I had to use trial and error (and my brain, a bit) to make it work since the VFX Graph I ended up with has three spawn events.
+
+I made it work with these steps:
+
+1. Create 3 sub-graphs (one for each spawn event) and put theme in a *main* VFX Graph.
+
+import vfxGraph1 from './img/vfx-graph-1.png';
+
+<Picture src={vfxGraph1} alt="VFX Graph 1"  />
+
+2. For each-subgraph, expose their "spawn count".
+
+import vfxGraph2 from './img/vfx-graph-2.png';
+
+<Picture src={vfxGraph2} alt="VFX Graph 2"  />
+
+3. Plug something similar to the next screenshot into each sub-graph.
+
+import vfxGraph3 from './img/vfx-graph-3.png';
+
+<Picture src={vfxGraph3} alt="VFX Graph 3"  />
+
+The code side of things is pretty straightforward.
+This VFX only needs a position and is a "one-shot" event.
+
+```csharp
+namespace Survivors.VfxTunnels
+{
+    [CreateAssetMenu(fileName = "New PositionGraphicsEventTunnel",
+        menuName = "Survivors/VfxTunnels/PositionGraphicsEventTunnel")]
+    public class PositionGraphicsEventTunnel : GraphicsEventTunnel<float3> { }
+}
+```
+<Caption>The EventTunnel is a simple `float3`</Caption>
+
+```csharp
+public struct OneShotPositionEventSpawner : IComponentData
+{
+    public UnityObjectRef<PositionGraphicsEventTunnel> PositionGraphicsEventTunnel;
+}
+```
+<Caption>The component is added to a prefab and a reference to this prefab is added to the axe</Caption>
+
+I'll skip the details on the additional spawn queue system since it is similar to the other spawn queue systems.
+
+Spawning the VFX events inside an `IJobEntity` works very well!
+
+```csharp
+    [BurstCompile]
+    internal partial struct VfxPositionEventSpawnerJob : IJobEntity
+    {
+        public GraphicsEventPostal                 MailBox;
+        public DestroyCommandBuffer.ParallelWriter Dcb;
+
+        void Execute(Entity entity, [EntityIndexInQuery] int idx, in WorldTransform transform,
+            ref OneShotPositionEventSpawner spawner)
+        {
+            var position = transform.worldTransform.position;
+            MailBox.Send(position, spawner.PositionGraphicsEventTunnel);
+            Dcb.Add(entity, idx);
+        }
+    }
+```
+
+## Feeling under-stimulated
+
+Implementing VFXs and SFXs are not my favorite part of game dev.
+Those simple examples are nice but boring to implement (since there may be a lot more of them to come).
+
+Don't be mistaken, though! LifeFX and Myri are super extensible and powerful modules.
+
+I could spend some time learning how to make custom filters for Myri or more complex VFXs (like those that are spawning from a SkinnedMesh's surface...) but it probably would be way over my current skill level and I'd like to focus more on the game mechanics.
+
+## Adding Shader Graphs effects to the Skeletons
+
+Scrolling through the aforementioned YouTube channel, I've found this video about [making a disintegrate and dissolve effect](https://youtu.be/we406Hc_WrM?si=kJEjg7nYP9WSFpgD).
+
+I thought it would be a nice effect to add to the skeletons when they die.
+
+I started by making a copy of the base shader graph I'm using for skinned meshes and followed the video.
+It gave me a material with an exposed value that can control the amount of *dissolve* and that looks like this:
+
+import dissolveShader1 from './img/dissolve-shader-1.png';
+import dissolveShader2 from './img/dissolve-shader-2.png';
+
+<Picture src={dissolveShader1} alt="Dissolve Shader Graph 1"  />
+
+<Picture src={dissolveShader2} alt="Dissolve Shader Graph 2"  />
+
+### Authoring the Dissolve effect
+
+That was surprisingly easy to implement!
+
+Here's the authoring script and components:
+
+```csharp
+namespace Survivors.Play.Authoring.Materials
+{
+    public class MaterialDissolveAuthoring : MonoBehaviour
+    {
+        [SerializeField] float dissolveSpeedMultiplier = .5f;
+
+        class MaterialDissolveAuthoringBaker : Baker<MaterialDissolveAuthoring>
+        {
+            public override void Bake(MaterialDissolveAuthoring authoring)
+            {
+                var entity = GetEntity(TransformUsageFlags.Renderable);
+                var dissolveAmount = new MaterialDissolveAmount
+                {
+                    Value = 0.0f
+                };
+
+                AddComponent(entity, dissolveAmount);
+
+                AddComponent(entity, new MaterialDissolveSpeed
+                {
+                    Value = authoring.dissolveSpeedMultiplier
+                });
+            }
+        }
+    }
+
+
+    [MaterialProperty("_Dissolve_Amount")]
+    public struct MaterialDissolveAmount : IComponentData
+    {
+        public float Value;
+    }
+
+    public struct MaterialDissolveSpeed : IComponentData
+    {
+        public float Value;
+    }
+}
+```
+
+### Updating the Skeletons
+
+To keep it simple, I modified the `SkeletonDeathSystem` to start the dissolve effect when the skeleton's death animation is finished playing. Additionally, I added a line to destroy the skeleton entity when the dissolve effect is over.
+
+```csharp
+        void Execute(
+            Entity entity,
+            [EntityIndexInQuery] int idx,
+            OptimizedSkeletonAspect skeleton,
+            in DeathClips clips,
+            ref DeathClipsStates clipStates,
+            ref DynamicBuffer<LinkedEntityGroup> linkedEntityGroup)
+        {
+
+            // [...]
+
+
+            // One shot clips
+            if (state.Time >= clips.ClipSet.Value.clips[clipStates.ChosenState].duration)
+            {
+
+                // Animation is done, start the dissolve effect
+
+                // Clamp to duration
+                state.Time = clips.ClipSet.Value.clips[clipStates.ChosenState].duration;
+                
+                var dissolved = false;
+
+                // apply dissolve to linked entities' materials
+                foreach (var entityGroup in linkedEntityGroup)
+                {
+                    if (!DissolveAmountLookup.HasComponent(entityGroup.Value)) continue;
+
+                    var dissolve = DissolveAmountLookup.GetRefRW(entityGroup.Value);
+                    var dissolveSpeed = DissolveSpeedLookup.GetRefRO(entityGroup.Value);
+                    dissolve.ValueRW.Value =
+                        math.min(dissolve.ValueRW.Value + DeltaTime * dissolveSpeed.ValueRO.Value, 1f);
+
+                    dissolved = (dissolve.ValueRW.Value >= 1f);
+                }
+
+                if (dissolved)
+                    // Destroy the skeleton entity
+                    Dcb.Add(entity, idx);
+
+                return;
+            }
+
+            // [...]
+        }
+```
+
+### Result
+
+<YouTube id="kTl4aoJu05E" />
+<Caption>Skeletons dissolving</Caption>
+
+### Conclusion
+
+This post took me a while to write. From April 17 to April 29!
+
+![Time Flies](https://i.imgflip.com/6ublkr.jpg)
+
+I've got sidetracked, got some life-related stuff to handle and I had to refactor the SFX system a few times... to end up with a super simple-stupid system 😭.
+
+I hope you enjoyed this post and learned something new about Latios Framework.
+
+Next post will be about... I don't know yet but it will be about gameplay mechanics because "we're not game yet".
+
+Source Code : [GitHub](https://github.com/clandais/Latios-Survivors-Articles/tree/part-5-Sfx-Buffers-v1)
