@@ -5,17 +5,39 @@ date: "Jan 2023"
 websiteURL: "https://billthegame.com/"
 ---
 
+
 import { YouTube } from 'astro-embed';
+import { Picture } from 'astro:assets';
+
+import indigo from './img/INDIGO_Selection_white.png'
 
 <YouTube id="https://www.youtube.com/watch?v=P1_rMh4JdNs" />
 
+<Picture src={indigo} alt="Indigo Selection" width={300} height={100} />
 
 Bill is going through a tough time in his life, he lost meaning and purpose. But one night, a UFO crashes in front of his little home in the woods. The passenger is an unconscious baby alien. You are his only chance of survival!
 
 **Lead Unity 3D developer** 
 
-- Refactoring the whole project.
-- Assets integrations
-- Performances optimizations
-- Implement new gameplay features
-- R&D
+*Beginnings*
+
+My first tasks on *Bill* were to implement new features.
+
+I quickly realized that the project needed a complete refactoring: it was iterated on a *game jam* codebase and implementing new features was becoming increasingly difficult.
+I proposed a refactoring to the main author (*Bill*'s Game Designer), which was accepted, and I started working on it.
+
+The refactoring took about 2 months and was a success. The codebase became much more maintainable and easier to work with, allowing us to implement new features more efficiently.
+
+I took the the lead on the programming side of the project, coordinating with the Game Designer and the rest of the team. 
+
+*Crafting System*
+
+*Bill* being a game about crafting, I implemented a *designer-friendly* tool to allow the Game Designer to create new recipes without needing to write code.
+
+This tool allowed the Game Designer to define the ingredients and the resulting item, as well as the crafting time and other parameters 
+(*e.g. Can the resulting item be built into the world? Can it be placed on walls? Does it needs to be placed on top of another item? How many of this items can be stacked into an inventory slot?*).
+
+This tool was built using Unity's Scriptable Objects, Prefabs and a custom editor window, allowing the Game Designer to create and edit recipes in a user-friendly way. 
+
+It allowed us to iterate quickly on the crafting system bumping the number of in-game items to over 100.
+
