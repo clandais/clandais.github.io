@@ -27,7 +27,12 @@ export const WORK: Metadata = {
 
 export const PROJECTS: Metadata = {
   TITLE: "Projects",
-  DESCRIPTION: "A collection of my projects, with links to repositories and demos.",
+  DESCRIPTION: "A collection of projects I worked on.",
+};
+
+export const EXPERIMENTS: Metadata = {
+  TITLE: "Experiments",
+  DESCRIPTION: "A collection of experiments.",
 };
 
 export const SOCIALS: Socials = [
