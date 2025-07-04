@@ -77,22 +77,6 @@ const work = await Promise.all(
 
       <section class="animate space-y-6">
         <div class="flex flex-wrap gap-y-2 items-center justify-between">
-          <h5 class="font-semibold text-black dark:text-white">Latest posts</h5>
-          <Link href="/blog"> See all posts </Link>
-        </div>
-        <ul class="flex flex-col gap-4">
-          {
-            blog.map((post) => (
-              <li>
-                <ArrowCard entry={post} />
-              </li>
-            ))
-          }
-        </ul>
-      </section>
-
-      <section class="animate space-y-6">
-        <div class="flex flex-wrap gap-y-2 items-center justify-between">
           <h5 class="font-semibold text-black dark:text-white">
             Recent projects
           </h5>
@@ -103,6 +87,22 @@ const work = await Promise.all(
             projects.map((project) => (
               <li>
                 <ArrowCard entry={project} />
+              </li>
+            ))
+          }
+        </ul>
+      </section>
+
+      <section class="animate space-y-6">
+        <div class="flex flex-wrap gap-y-2 items-center justify-between">
+          <h5 class="font-semibold text-black dark:text-white">Latest posts</h5>
+          <Link href="/blog"> See all posts </Link>
+        </div>
+        <ul class="flex flex-col gap-4">
+          {
+            blog.map((post) => (
+              <li>
+                <ArrowCard entry={post} />
               </li>
             ))
           }
@@ -136,14 +136,12 @@ const work = await Promise.all(
         </ul>
       </section>
 
-
-
       <section class="animate space-y-4">
         <h5 class="font-semibold text-black dark:text-white">Let's Connect</h5>
         <article>
           <p>
             If you want to get in touch with me about something or just to say
-            hi, reach out on social media or send me an email.
+            <i>hi</i>, reach out on social media or send me an email.
           </p>
         </article>
         <ul class="flex flex-wrap gap-2">
@@ -165,9 +163,7 @@ const work = await Promise.all(
             <Link
               href={`mailto:${SITE.EMAIL}`}
               aria-label={`Email ${SITE.NAME}`}
-            >
-              {SITE.EMAIL}
-            </Link>
+            >{SITE.EMAIL}</Link>
           </li>
         </ul>
       </section>
