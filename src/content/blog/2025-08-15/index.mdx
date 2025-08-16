@@ -1,0 +1,290 @@
+---
+title: "Latios Framework: Recipe number 1"
+date: "Aug 15 2025"
+description: "A recipe to make a quick 2 bones IK rig with Latios Framework."
+draft: false
+---
+
+import { Picture } from 'astro:assets';
+import Caption from "@components/Caption.astro";
+
+import CodeAccordion from "@components/CodeAccordion.astro";
+
+
+*This short article is a recipe to make a quick 2 bones IK rig with Latios Framework. It is not a tutorial, but rather a reference for those who want to implement it themselves.*
+
+
+I wanted to have a working *2 bones IK rig* in Latios Framework, something similar to the one in Unity's Animation Rigging package.
+
+## *Can we reference some bones in an authoring script, get them back in a system and modify their transforms?*
+
+Yes. There is multiple ways do do this, I guess, but here is one way to do it.
+
+Let's say that I need to reference a *root* bone, a *mid* bone and a *tip* bone.
+
+```csharp
+
+public class TwoBoneIkConstraintAuthoring : MonoBehaviour
+{
+    [SerializeField] Transform rootBone;
+    [SerializeField] Transform midBone;
+    [SerializeField] Transform tipBone;
+    // [...]
+
+}
+```
+
+I'll store them as `FixedString32Bytes` in a `TwoBoneIkConstraint` component (with extra stuff)
+```csharp
+public struct TwoBoneIkConstraint : IComponentData
+{
+    public FixedString32Bytes TipBoneName;
+    public FixedString32Bytes MidBoneName;
+    public FixedString32Bytes RootBoneName;
+    
+    public float PositionWeight;
+    public float RotationWeight;
+
+    public EntityWith<WorldTransform> TargetTransformSource;
+    public EntityWith<WorldTransform> HintTransformSource;
+}
+``` 
+
+
+Then assign them in the authoring script
+```csharp
+public class TwoBoneIkConstraintAuthoring : MonoBehaviour
+{
+    [SerializeField] Transform rootBone;
+    [SerializeField] Transform midBone;
+    [SerializeField] Transform tipBone;
+
+    [SerializeField] float positionWeight = 1f;
+    [SerializeField] float rotationWeight = 1f;
+
+    [SerializeField] Transform targetTransform;
+    [SerializeField] Transform hintTransform;
+
+    class TwoBoneIkConstraintBaker : Baker<TwoBoneIkConstraintAuthoring>
+    {
+        public override void Bake(TwoBoneIkConstraintAuthoring authoring)
+        {
+            var entity = GetEntity(TransformUsageFlags.Dynamic);
+            AddComponent(entity, new TwoBoneIkConstraint
+            {
+                RootBoneName = new FixedString32Bytes(authoring.rootBone.name),
+                MidBoneName = new FixedString32Bytes(authoring.midBone.name),
+                TipBoneName = new FixedString32Bytes(authoring.tipBone.name),
+
+                PositionWeight = authoring.positionWeight,
+                RotationWeight = authoring.rotationWeight,
+
+                TargetTransformSource = GetEntity(authoring.targetTransform, TransformUsageFlags.Dynamic),
+                HintTransformSource = GetEntity(authoring.hintTransform, TransformUsageFlags.Dynamic)
+            });
+        }
+    }
+}
+```
+
+Then get the bones in a system or an `IJobEntity`
+```csharp
+partial struct TwoBoneIkJob : IJobEntity
+{
+    void Execute(OptimizedSkeletonAspect skeleton,
+        in TwoBoneIkConstraint constraint,
+        in SkeletonBindingPathsBlobReference bindingPaths)
+    {
+        if (!bindingPaths.blob.Value.TryGetFirstPathIndexThatStartsWith(constraint.TipBoneName,
+                out var tipBoneidx))
+            return; // Whoops, no tip bone found!
+
+
+        if (!bindingPaths.blob.Value.TryGetFirstPathIndexThatStartsWith(constraint.MidBoneName,
+                out var midBoneidx))
+            return; // Whoops, no mid bone found!
+
+        if (!bindingPaths.blob.Value.TryGetFirstPathIndexThatStartsWith(constraint.RootBoneName,
+                out var rootBoneidx))
+            return; // Whoops, no root bone found!
+
+
+        // Now we can get the bones from the skeleton aspect
+        // using the indices we got from the binding paths blob
+        var rootBone = skeletonAspect.bones[rootBoneidx];
+        var midBone = skeletonAspect.bones[midBoneidx];
+        var tipBone = skeletonAspect.bones[tipBoneidx];
+    
+        // We could check if the bones are parented correctly here
+        if (tipBone.parent.index != midBone.index || midBone.parent.index != rootBone.index)
+        {
+            Debug.LogError("TwoBoneIkConstraint bones are not in a valid hierarchy.");
+            return;
+        }
+
+        // Got you!
+        // Now you can modify the transforms of the bones
+        rootBone.worldPosition = new float3(0, 0, 0); // Mister, your root bone is on the floor!
+        rootBone.worldRotation = quaternion.identity;
+    }
+}
+```
+
+Done!
+
+
+## *How do we do the 2 bone IK thing?*
+
+I got lost at this point, reading about CCD, FABRIK, EWBIK, etc... That's kinda cool but they are general solutions for an arbitrary number of bones.
+Luckily, we can peek at the Unity Animation Rigging package's source code and see how they do it.
+
+It was simple to "port".
+
+First, the *utility* functions.
+```csharp
+
+// See UnityEngine.Animations.Rigging.AnimationRuntimeUtils
+float TriangleAngle(float aLen, float aLen1, float aLen2)
+{
+    var c = math.clamp((aLen1 * aLen1 + aLen2 * aLen2 - aLen * aLen) / (aLen1 * aLen2) / 2.0f, -1.0f, 1.0f);
+    return math.acos(c);
+}
+
+// See UnityEngine.Animations.Rigging.QuaternionExt
+quaternion FromToRotation(float3 from, float3 to)
+{
+    var teta = math.dot(math.normalize(from), math.normalize(to));
+    if (teta >= 1f)
+        return quaternion.identity;
+
+    if (teta <= -1f)
+    {
+        var axis = math.cross(from, math.right());
+        if (math.lengthsq(axis) == 0f)
+            axis = math.cross(from, math.up());
+
+        return quaternion.AxisAngle(axis, math.PI);
+    }
+
+    return quaternion.AxisAngle(math.normalize(math.cross(from, to)), math.acos(teta));
+}
+```
+
+Then the *2 bones IK* function.
+
+<CodeAccordion title="Two bone IK ported from Unity Animation Rigging">
+```csharp
+
+    var rootBone = skeletonAspect.bones[rootBoneidx];
+    var midBone = skeletonAspect.bones[midBoneidx];
+    var tipBone = skeletonAspect.bones[tipBoneidx];
+
+    var aPosition = rootBone.worldPosition;
+    var bPosition = midBone.worldPosition;
+    var cPosition = tipBone.worldPosition;
+
+    var targetTransform = WorldTransforms[constraint.TargetTransformSource];
+    var hintTransform = WorldTransforms[constraint.HintTransformSource];
+
+
+    var tPosition = math.lerp(cPosition, targetTransform.position, constraint.PositionWeight);
+    var tRotation = math.slerp(tipBone.worldRotation, targetTransform.rotation,
+        constraint.RotationWeight);
+
+    var ab = bPosition - aPosition;
+    var bc = cPosition - bPosition;
+    var ac = cPosition - aPosition;
+    var at = tPosition - aPosition;
+
+    var abLength = math.length(ab);
+    var bcLength = math.length(bc);
+    var acLength = math.length(ac);
+    var atLength = math.length(at);
+
+    var oldAbcAngle = TriangleAngle(acLength, abLength, bcLength);
+    var newAbcAngle = TriangleAngle(atLength, abLength, bcLength);
+
+
+    // Bend normal strategy is to take whatever has been provided in the animation
+    // stream to minimize configuration changes, however if this is collinear
+    // try computing a bend normal given the desired target position.
+    // If this also fails, try resolving axis using hint if provided.
+    var axis = math.cross(ab, bc);
+    if (math.lengthsq(axis) < k_SqrEpsilon)
+    {
+        axis = math.cross(hintTransform.position - aPosition, bc);
+
+        if (math.lengthsq(axis) < k_SqrEpsilon) axis = math.cross(at, bc);
+        if (math.lengthsq(axis) < k_SqrEpsilon) axis = math.up();
+    }
+
+    axis = math.normalize(axis);
+
+
+    var a = .5f * (oldAbcAngle - newAbcAngle);
+    var sin = math.sin(a);
+    var cos = math.cos(a);
+    var deltaR = new quaternion(axis.x * sin, axis.y * sin, axis.z * sin, cos);
+
+    midBone.worldRotation = math.mul(deltaR, midBone.worldRotation);
+
+    cPosition              = tipBone.worldPosition;
+    ac                     = cPosition - aPosition;
+    rootBone.worldRotation = math.mul(FromToRotation(ac, at), rootBone.worldRotation);
+
+    var acSqrMag = math.lengthsq(ac);
+    if (acSqrMag > 0f)
+    {
+        bPosition = midBone.worldPosition;
+        cPosition = tipBone.worldPosition;
+        ab        = bPosition - aPosition;
+        ac        = cPosition - aPosition;
+
+        var acNorm = ac / math.sqrt(acSqrMag);
+        var ah = hintTransform.position - aPosition;
+        var abProj = ab - acNorm * math.dot(ab, acNorm);
+        var ahProj = ah - acNorm * math.dot(ah, acNorm);
+
+        var maxReach = abLength + bcLength;
+
+        if (math.lengthsq(abProj) > maxReach * maxReach * 0.001f && math.lengthsq(ahProj) > 0)
+        {
+            var hintR = FromToRotation(abProj, ahProj);
+            rootBone.worldRotation = math.mul(hintR, rootBone.worldRotation);
+        }
+    }
+
+    tipBone.worldRotation = tRotation;
+```
+</CodeAccordion>
+
+## Bonus
+
+1. Make the `TwoBoneIkConstraint` an `IBufferElementData` instead of a `IComponentData` to allow multiple constraints on the same entity!
+2. Make the IK System run **after** your animation system to allow for animation overrides.
+
+
+Below are two examples of the same walk animation running with different IK weights.
+
+import loop50pctIK from './img/Looped_50pct_IK.gif';
+
+<Picture src={loop50pctIK} alt="Looped 50% IK" />
+<Caption>50% "position weight" : the sneaky guy</Caption>
+
+
+import loop100pctIK from './img/Looped_100pct_IK.gif';
+
+<Picture src={loop100pctIK} alt="Looped 100% IK" />
+<Caption>100% "position weight" : the biker guy</Caption>
+
+## Conclusion
+
+That may be a bit **bold** for me to say that but :
+implementing your own IK system (or any system that would modify animated skeletons) in DOTS with Latios Framework is even easier than it would be with Unity's GameObject workflow.
+
+Messing with Unity's Animator Component can be a pain.
+
+import fighter from './img/fighter.png';
+
+<Picture src={fighter} alt="Fighter" />
+<Caption>Fighter pose!</Caption>
